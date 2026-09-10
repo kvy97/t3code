@@ -15,8 +15,7 @@ export type StackLayer = typeof StackLayer.Type;
  * pull request store T3 already refreshes, and `dirty`/`headBranch` come from
  * the VCS status for the same cwd. Two sources for one fact is a bug waiting.
  */
-export const StackView = Schema.Struct({
-  _tag: Schema.Literal("available"),
+export const StackView = Schema.TaggedStruct("available", {
   worktreePath: TrimmedNonEmptyString,
   trunk: TrimmedNonEmptyString,
   /** The number GitHub's stack UI shows. `gh stack` v0.1.1 does not emit it. */
@@ -36,8 +35,7 @@ export const StackUnavailableReason = Schema.Literals([
 export type StackUnavailableReason = typeof StackUnavailableReason.Type;
 
 /** Not an error: a displayable state. The sidebar degrades to worktree grouping. */
-export const StackUnavailable = Schema.Struct({
-  _tag: Schema.Literal("unavailable"),
+export const StackUnavailable = Schema.TaggedStruct("unavailable", {
   reason: StackUnavailableReason,
   freshness: VcsFreshness,
 });
