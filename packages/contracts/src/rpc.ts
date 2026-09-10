@@ -234,6 +234,15 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  StackActionConflictedError,
+  StackActionInput,
+  StackActionResult,
+  StackStatus,
+  StackViewFailedError,
+  StackViewInput,
+  StackWorktreeBusyError,
+} from "./stack.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -279,6 +288,10 @@ export const WS_METHODS = {
   vcsCreateRef: "vcs.createRef",
   vcsSwitchRef: "vcs.switchRef",
   vcsInit: "vcs.init",
+
+  // Stack methods (gh stack; unrelated to git.runStackedAction)
+  stackView: "stack.view",
+  stackAction: "stack.action",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -934,6 +947,24 @@ const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
   error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
 });
 
+const WsStackViewRpc = Rpc.make(WS_METHODS.stackView, {
+  payload: StackViewInput,
+  success: StackStatus,
+  error: Schema.Union([StackViewFailedError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsStackActionRpc = Rpc.make(WS_METHODS.stackAction, {
+  payload: StackActionInput,
+  success: StackActionResult,
+  error: Schema.Union([
+    StackViewFailedError,
+    StackWorktreeBusyError,
+    StackActionConflictedError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
 /**
  * Ephemeral live diff preview for compact/mobile surfaces.
  * Not the persisted T3 Review model. Future review sessions should use
@@ -1267,6 +1298,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsCreateRefRpc,
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,
+  WsStackViewRpc,
+  WsStackActionRpc,
   WsReviewGetDiffPreviewRpc,
   WsReviewGetDiffFileContentsRpc,
   WsTerminalOpenRpc,
