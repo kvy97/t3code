@@ -219,9 +219,12 @@ export const make = Effect.gen(function* () {
    * through T3, and a HEAD change seen by the cwd's VCS status.
    *
    * Known hole: `gh stack add` typed straight into a terminal fires none of
-   * them. The mitigations are the refresh button on the stack row and the
-   * invalidation on terminal-tab close. A `.git/` watcher was rejected: it
-   * would depend on a gh-stack metadata layout the extension does not promise.
+   * them, and it ships unmitigated. A refresh button was rejected because the
+   * cache does not invalidate on resubscribe, so the button would lie rather
+   * than refresh. Terminal-close invalidation was investigated and dropped: a
+   * closing terminal carries only a thread id, with no worktree path to act
+   * on. A `.git/` watcher was rejected too — it would depend on a gh-stack
+   * metadata layout the extension does not promise.
    */
   const streamStack: StackViewBroadcaster["Service"]["streamStack"] = (input) =>
     Stream.unwrap(
