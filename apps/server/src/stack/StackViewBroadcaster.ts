@@ -53,7 +53,11 @@ export class StackViewBroadcaster extends Context.Service<
 >()("t3/stack/StackViewBroadcaster") {}
 
 function fingerprintStatus(status: StackStatus): string {
-  return JSON.stringify(status);
+  // `freshness.observedAt` is a fresh timestamp on every read, so fingerprinting
+  // it would make every refresh look like a change and defeat the dedup. Only
+  // the structure decides whether subscribers need a new event.
+  const { freshness: _freshness, ...structure } = status;
+  return JSON.stringify(structure);
 }
 
 /** @public Service construction is part of the canonical Effect module API. */

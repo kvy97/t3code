@@ -63,7 +63,12 @@ describe("StackViewBroadcaster", () => {
           broadcaster.streamStack({ worktreePath: "/repo/wt" }).pipe(Stream.take(2)),
         ).pipe(Effect.forkChild({ startImmediately: true }));
 
-        // Same chain: no event.
+        // Advance the clock so the next read's `observedAt` genuinely differs
+        // from the initial one. Dedup must survive a changed timestamp, not
+        // just an unchanged one under a frozen TestClock.
+        yield* TestClock.adjust("1 second");
+
+        // Same chain, later timestamp: no event.
         yield* broadcaster.refreshStack("/repo/wt");
         // Changed chain: one event.
         branchesRef.current = ["feat/base", "feat/top"];
