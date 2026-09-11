@@ -483,6 +483,7 @@ describe("buildStackActionItems", () => {
     layerCount: 2,
     stackNumber: 7,
     unavailableReason: null,
+    availability: "available",
   } as const;
 
   it("offers the four whole-stack actions", async () => {
@@ -508,13 +509,28 @@ describe("buildStackActionItems", () => {
 
   it("offers nothing when the stack backend is unavailable", () => {
     const items = buildStackActionItems({
-      group: { ...group, unavailableReason: "gh-missing" },
+      group: { ...group, unavailableReason: "gh-missing", availability: "unavailable" },
       worktreeLabel: "wt",
       icon: null,
       runAction: async () => {},
     });
 
     expect(items).toEqual([]);
+  });
+
+  it("offers nothing while the read is in flight or after it failed", () => {
+    // `unavailableReason` stays null in both states, so a gate reading it
+    // alone would hand the user four actions for a chain nobody has read.
+    for (const availability of ["loading", "failed"] as const) {
+      expect(
+        buildStackActionItems({
+          group: { ...group, availability },
+          worktreeLabel: "wt",
+          icon: null,
+          runAction: async () => {},
+        }),
+      ).toEqual([]);
+    }
   });
 
   it("finds an action by the stack number and the worktree name", () => {

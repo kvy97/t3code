@@ -58,6 +58,18 @@ describe("buildStackGroups", () => {
     expect(group?.layerCount).toBe(2);
   });
 
+  it("keeps a loading and a failed read apart from an available one", () => {
+    const availabilityOf = (status: StackGroupSource["status"]) =>
+      buildStackGroups([source({ status })])[0]?.availability;
+
+    expect(availabilityOf(available(["feat/base", "feat/top"]))).toBe("available");
+    expect(availabilityOf(null)).toBe("loading");
+    expect(availabilityOf("failed")).toBe("failed");
+    expect(availabilityOf({ _tag: "unavailable", reason: "gh-missing", freshness })).toBe(
+      "unavailable",
+    );
+  });
+
   it("keeps a thread whose branch is not a layer, after the matched ones", () => {
     const [group] = buildStackGroups([
       source({
@@ -336,5 +348,14 @@ describe("formatStackLayerCountLabel", () => {
       }),
     ]);
     expect(formatStackLayerCountLabel(group!)).toBe("2 threads");
+  });
+
+  it("counts threads while the read is in flight and after it failed", () => {
+    // Both leave `unavailableReason` null, so a label that reads it alone
+    // claims a layer count nobody has read — "0 layers" over two rows.
+    for (const status of [null, "failed"] as const) {
+      const [group] = buildStackGroups([source({ status })]);
+      expect(formatStackLayerCountLabel(group!)).toBe("2 threads");
+    }
   });
 });

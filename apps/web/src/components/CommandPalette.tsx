@@ -1047,6 +1047,7 @@ function OpenCommandPaletteDialog(props: {
         activeThreadStackStatus._tag === "available" ? activeThreadStackStatus.stackNumber : null,
       unavailableReason:
         activeThreadStackStatus._tag === "unavailable" ? activeThreadStackStatus.reason : null,
+      availability: activeThreadStackStatus._tag,
     };
     return buildStackActionItems({
       group,

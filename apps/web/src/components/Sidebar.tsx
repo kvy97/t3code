@@ -2096,7 +2096,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 const StackStatusProbe = memo(function StackStatusProbe(props: {
   environmentId: EnvironmentId;
   worktreePath: string;
-  onStatus: (worktreePath: string, status: StackStatus | null) => void;
+  onStatus: (worktreePath: string, status: StackStatus | "failed" | null) => void;
 }) {
   const query = useEnvironmentQuery(
     stackEnvironment.status({
@@ -2104,7 +2104,10 @@ const StackStatusProbe = memo(function StackStatusProbe(props: {
       input: { worktreePath: props.worktreePath },
     }),
   );
-  const status = query.data ?? null;
+  // A failed read is not an empty stack: reported as `null` it would render
+  // as an available stack with "0 layers" and all four gh actions enabled,
+  // permanently, since nothing retries it.
+  const status = query.data ?? (query.error === null ? null : "failed");
   useEffect(() => {
     props.onStatus(props.worktreePath, status);
   }, [props, status]);
@@ -2814,18 +2817,21 @@ export default function Sidebar() {
   }, [activeThreads, pinnedThreads, settledThreads, snoozedThreads]);
 
   const [stackStatusByWorktree, setStackStatusByWorktree] = useState<
-    ReadonlyMap<string, StackStatus | null>
+    ReadonlyMap<string, StackStatus | "failed" | null>
   >(() => new Map());
-  const handleStackStatus = useCallback((worktreePath: string, status: StackStatus | null) => {
-    setStackStatusByWorktree((current) => {
-      // Identity guard: the probe re-reports on every stream event, and an
-      // unconditional setState here would repaint the whole sidebar.
-      if (current.get(worktreePath) === status) return current;
-      const next = new Map(current);
-      next.set(worktreePath, status);
-      return next;
-    });
-  }, []);
+  const handleStackStatus = useCallback(
+    (worktreePath: string, status: StackStatus | "failed" | null) => {
+      setStackStatusByWorktree((current) => {
+        // Identity guard: the probe re-reports on every stream event, and an
+        // unconditional setState here would repaint the whole sidebar.
+        if (current.get(worktreePath) === status) return current;
+        const next = new Map(current);
+        next.set(worktreePath, status);
+        return next;
+      });
+    },
+    [],
+  );
 
   const stackGroupSources = useMemo(
     (): readonly StackGroupSource[] =>

@@ -196,7 +196,9 @@ export function buildStackActionItems(input: {
   readonly icon: ReactNode;
   readonly runAction: (action: StackActionKind) => Promise<void>;
 }): CommandPaletteActionItem[] {
-  if (input.group.unavailableReason !== null) return [];
+  // Loading and failed reads offer nothing either: the four actions only
+  // exist once the chain actually read back.
+  if (input.group.availability !== "available") return [];
   return STACK_PALETTE_ACTIONS.map((entry) => ({
     kind: "action" as const,
     value: `stack:${input.group.worktreePath}:${entry.action}`,

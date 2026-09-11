@@ -270,7 +270,7 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
         const api = readLocalApi();
         if (!api) return;
         const items = buildStackRowMenuItems({
-          stackAvailable: group.unavailableReason === null,
+          stackAvailable: group.availability === "available",
           layers,
           busy: props.busy,
           pinningSupported: readEnvironmentSupportsPinning(environmentId),
@@ -312,7 +312,7 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
     },
     [
       environmentId,
-      group.unavailableReason,
+      group.availability,
       isGroupPinned,
       isGroupSettled,
       layers,

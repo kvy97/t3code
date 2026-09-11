@@ -16,8 +16,9 @@ export interface StackGroupMember {
 
 export interface StackGroupSource {
   readonly worktreePath: string;
-  /** Null while the chain loads: render the group, offer no stack action. */
-  readonly status: StackStatus | null;
+  /** Null while the chain loads, `"failed"` once the read errored — nothing
+      retries it. Render the group either way, offer no stack action. */
+  readonly status: StackStatus | "failed" | null;
   readonly members: ReadonlyArray<StackGroupMember>;
   readonly collapsed: boolean;
   readonly checkedOutBranch: string | null;
@@ -33,6 +34,16 @@ export interface StackGroup {
   readonly layerCount: number;
   readonly stackNumber: number | null;
   readonly unavailableReason: StackUnavailableReason | null;
+  /** `unavailableReason === null` is not the same as "there is a stack":
+      it is also null while the read is in flight and after it failed. Only
+      `"available"` may claim a layer count or offer a `gh` action. */
+  readonly availability: "loading" | "available" | "unavailable" | "failed";
+}
+
+function resolveAvailability(status: StackGroupSource["status"]) {
+  if (status === "failed") return "failed" as const;
+  if (status === null) return "loading" as const;
+  return status._tag;
 }
 
 const SECTION_RANK: Record<"pinned" | "active" | "settled", number> = {
@@ -63,9 +74,9 @@ function resolveGroupSection(
     no longer a layer keeps its incoming order at the top of the run. */
 function orderMembers(
   members: ReadonlyArray<StackGroupMember>,
-  status: StackStatus | null,
+  status: StackGroupSource["status"],
 ): StackGroupMember[] {
-  if (status === null || status._tag !== "available") return [...members];
+  if (status === null || status === "failed" || status._tag !== "available") return [...members];
   const positionByBranch = new Map(
     status.layers.map((layer) => [layer.branch, layer.position] as const),
   );
@@ -116,6 +127,8 @@ export function buildStackGroups(sources: ReadonlyArray<StackGroupSource>): Stac
       routeKey: source.routeKey,
     });
     const visible = new Set(visibleMemberKeys);
+    const availability = resolveAvailability(source.status);
+    const status = typeof source.status === "object" ? source.status : null;
     return [
       {
         worktreePath: source.worktreePath,
@@ -123,9 +136,10 @@ export function buildStackGroups(sources: ReadonlyArray<StackGroupSource>): Stac
         memberKeys: ordered.map((member) => member.key),
         visibleMemberKeys,
         hiddenMemberKeys: ordered.map((member) => member.key).filter((key) => !visible.has(key)),
-        layerCount: source.status?._tag === "available" ? source.status.layers.length : 0,
-        stackNumber: source.status?._tag === "available" ? source.status.stackNumber : null,
-        unavailableReason: source.status?._tag === "unavailable" ? source.status.reason : null,
+        layerCount: status?._tag === "available" ? status.layers.length : 0,
+        stackNumber: status?._tag === "available" ? status.stackNumber : null,
+        unavailableReason: status?._tag === "unavailable" ? status.reason : null,
+        availability,
       } satisfies StackGroup,
     ];
   });
@@ -240,8 +254,11 @@ export function describeStackUnavailable(reason: StackUnavailableReason): {
  * read as "1 of 2 layers", not just "2 layers" sitting oddly over one row.
  */
 export function formatStackLayerCountLabel(group: StackGroup): string {
-  const total = group.unavailableReason === null ? group.layerCount : group.memberKeys.length;
-  const noun = group.unavailableReason === null ? "layer" : "thread";
+  // Only a stack that actually read back has layers to count; loading and
+  // failed both counted as "0 layers" while the read said nothing at all.
+  const layers = group.availability === "available";
+  const total = layers ? group.layerCount : group.memberKeys.length;
+  const noun = layers ? "layer" : "thread";
   const label = `${total} ${noun}${total === 1 ? "" : "s"}`;
   return group.hiddenMemberKeys.length === 0
     ? label
