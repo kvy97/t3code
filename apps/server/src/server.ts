@@ -489,8 +489,18 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
     Layer.mergeAll(SourceControlProviderRegistryLayerLive, PullRequestServiceLive),
   ),
   Layer.provideMerge(GitLayerLive),
-  Layer.provideMerge(VcsLayerLive),
+  // Order is load-bearing, and it reads backwards: in a `provideMerge` chain
+  // each entry provides to everything ABOVE it, so a layer's own
+  // requirements must be satisfied by entries BELOW it. StackLayerLive needs
+  // VcsStatusBroadcaster (WorktreeTurnGuard), and ProjectionSnapshotQuery
+  // plus OrchestrationEngineService (StackActionRunner, WorktreeTurnGuard),
+  // so it sits above VcsLayerLive and above ProviderRuntimeLayerLive — while
+  // staying below ReactorLayerLive, which is what consumes its
+  // StackViewBroadcaster from CheckpointReactor. Putting it below
+  // VcsLayerLive compiles and then dies at runtime with
+  // "Service not found: t3/vcs/VcsStatusBroadcaster".
   Layer.provideMerge(StackLayerLive),
+  Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
@@ -554,6 +564,37 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
 );
+
+/**
+ * Boot gate, stated once and in one place.
+ *
+ * `RuntimeCoreDependenciesLive` is a `provideMerge` chain, and those read
+ * backwards: each entry provides to the entries ABOVE it, so a layer's own
+ * requirements must be satisfied by entries BELOW it. Put a layer on the
+ * wrong side of a service it needs and the requirement simply stays in the
+ * channel; the server then dies on startup with `Service not found`.
+ *
+ * `tsc` does catch that — but it reports it as a cascade in whatever happens
+ * to consume `runServer`, which for `StackLayerLive` meant 122 errors across
+ * five CLI and CLI-test files, far from the chain that caused them. Every
+ * gate on that change read the count as a stale baseline and checked only
+ * that it had not moved. This alias makes the same failure report once, here,
+ * naming the service.
+ *
+ * The tell is that the missing service is one this very chain also OUTPUTS:
+ * it is provided, just on the wrong side. So nothing the chain produces may
+ * remain in the channel of things it still needs. What legitimately stays
+ * there is the Node platform (FileSystem, Path, Crypto, HttpClient, ...),
+ * which `makeServerLayer` supplies and this chain never produces — so there
+ * is no list to keep up to date here.
+ */
+type SelfProvidedRequirements = Extract<
+  Layer.Services<typeof RuntimeDependenciesLive>,
+  Layer.Success<typeof RuntimeDependenciesLive>
+>;
+type AssertNoSelfProvidedRequirements<T extends never> = T;
+export type RuntimeDependenciesAreWiredInOrder =
+  AssertNoSelfProvidedRequirements<SelfProvidedRequirements>;
 
 const commandReadinessLayer = HttpRouter.middleware(
   (httpEffect) =>
