@@ -1,4 +1,4 @@
-import { memo, useCallback, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useCallback, useMemo, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronDown, ChevronRight, Layers } from "lucide-react";
 import { CSS } from "@dnd-kit/utilities";
 import * as Schema from "effect/Schema";
@@ -8,15 +8,22 @@ import {
   isAtomCommandInterrupted,
   settlePromise,
   squashAtomCommandFailure,
+  type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import {
   StackActionConflictedError,
   type ContextMenuItem,
+  type ScopedThreadRef,
   type StackActionKind,
 } from "@t3tools/contracts";
 
+import { useThreadActions } from "../hooks/useThreadActions";
 import { cn } from "../lib/utils";
 import { readLocalApi } from "../localApi";
+import {
+  readEnvironmentSupportsPinning,
+  readEnvironmentSupportsSettlement,
+} from "../state/entities";
 import { stackEnvironment } from "../state/stack";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useEnvironmentQuery } from "../state/query";
@@ -45,31 +52,73 @@ const STACK_ROW_WHOLE_STACK_ACTIONS: ReadonlyArray<{
 
 type StackRowMenuId =
   | (typeof STACK_ROW_WHOLE_STACK_ACTIONS)[number]["action"]
+  | "pin"
+  | "unpin"
+  | "settle"
+  | "unsettle"
   | `checkout:${string}`;
 
-/** The row's right-click menu: the four whole-stack actions plus a checkout
-    entry per layer, ordered bottom-to-top the way the layers render below
-    the row. Disabled entirely while a member thread is running — the server
-    guards the same condition, so this only prevents a click that would fail
-    for a reason the user can already see (the running-thread dot). */
+/**
+ * The row's right-click menu: the four whole-stack `gh` actions plus a
+ * checkout entry per layer (both gated on the stack backend being
+ * available and disabled while a member is running, since the server would
+ * refuse them anyway), and — regardless of stack-backend availability,
+ * since these are plain thread-lifecycle commands — a pin/unpin and a
+ * settle/unsettle toggle that apply to every member. Each toggle is hidden
+ * entirely on a server that predates the capability, the same way
+ * `SidebarThreadRow`'s own menu hides them, rather than offering an item
+ * that fails on click.
+ */
 function buildStackRowMenuItems(input: {
+  readonly stackAvailable: boolean;
   readonly layers: ReadonlyArray<{ readonly branch: string; readonly position: number }>;
   readonly busy: boolean;
+  readonly pinningSupported: boolean;
+  readonly settlementSupported: boolean;
+  readonly isPinned: boolean;
+  readonly isSettled: boolean;
 }): ContextMenuItem<StackRowMenuId>[] {
-  const items: ContextMenuItem<StackRowMenuId>[] = STACK_ROW_WHOLE_STACK_ACTIONS.map((entry) => ({
-    id: entry.action,
-    label: entry.label,
-    disabled: input.busy,
-  }));
-  const layers = [...input.layers].sort((left, right) => left.position - right.position);
-  layers.forEach((layer, index) => {
-    items.push({
-      id: `checkout:${layer.branch}`,
-      label: `Check out ${layer.branch}`,
-      disabled: input.busy,
-      ...(index === 0 ? { separatorBefore: true } : {}),
-    });
+  const items: ContextMenuItem<StackRowMenuId>[] = [];
+
+  if (input.stackAvailable) {
+    items.push(
+      ...STACK_ROW_WHOLE_STACK_ACTIONS.map((entry) => ({
+        id: entry.action,
+        label: entry.label,
+        disabled: input.busy,
+      })),
+    );
+  }
+
+  const lifecycleItems: ContextMenuItem<StackRowMenuId>[] = [];
+  if (input.pinningSupported) {
+    lifecycleItems.push(
+      input.isPinned ? { id: "unpin", label: "Unpin stack" } : { id: "pin", label: "Pin stack" },
+    );
+  }
+  if (input.settlementSupported) {
+    lifecycleItems.push(
+      input.isSettled
+        ? { id: "unsettle", label: "Un-settle stack" }
+        : { id: "settle", label: "Settle stack" },
+    );
+  }
+  lifecycleItems.forEach((item, index) => {
+    items.push(index === 0 && items.length > 0 ? { ...item, separatorBefore: true } : item);
   });
+
+  if (input.stackAvailable) {
+    const layers = [...input.layers].sort((left, right) => left.position - right.position);
+    layers.forEach((layer, index) => {
+      items.push({
+        id: `checkout:${layer.branch}`,
+        label: `Check out ${layer.branch}`,
+        disabled: input.busy,
+        ...(index === 0 ? { separatorBefore: true } : {}),
+      });
+    });
+  }
+
   return items;
 }
 
@@ -106,6 +155,62 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
   // target for a conflict's terminal.
   const bottomMemberRef = parseScopedThreadKey(group.memberKeys[0] ?? "");
   const environmentId = bottomMemberRef?.environmentId ?? null;
+  const memberThreadRefs = useMemo(
+    () =>
+      group.memberKeys.flatMap((key) => {
+        const ref = parseScopedThreadKey(key);
+        return ref ? [ref] : [];
+      }),
+    [group.memberKeys],
+  );
+
+  // `resolveGroupSection` already picks "pinned" the moment any member is
+  // pinned, and "settled" only once every member is — the exact aggregate
+  // the row's own pin/settle toggle needs, so this reuses that single
+  // source rather than re-deriving it from the member threads.
+  const isGroupPinned = group.section === "pinned";
+  const isGroupSettled = group.section === "settled";
+
+  const { pinThread, unpinThread, settleThread, unsettleThread } = useThreadActions();
+  const runBulkThreadLifecycleAction = useCallback(
+    async (
+      action: (ref: ScopedThreadRef) => Promise<AtomCommandResult<unknown, unknown>>,
+      successTitle: string,
+      failureTitle: string,
+    ) => {
+      // Sequential, not Promise.all: pin's own orderKey defaults to "top of
+      // the pinned run" computed fresh from local state, and running every
+      // member's dispatch in parallel would have each read that same
+      // pre-pin snapshot and collide on one key. Awaiting one at a time lets
+      // each member's pin land before the next one computes its key.
+      const results: AtomCommandResult<unknown, unknown>[] = [];
+      for (const ref of memberThreadRefs) {
+        results.push(await action(ref));
+      }
+      const failed = results.filter(
+        (result): result is Extract<AtomCommandResult<unknown, unknown>, { _tag: "Failure" }> =>
+          result._tag === "Failure" && !isAtomCommandInterrupted(result),
+      );
+      if (failed.length === 0) {
+        toastManager.add(stackedThreadToast({ type: "success", title: successTitle }));
+        return;
+      }
+      // A verb that half-applies must say so — never report the whole
+      // group done when only some members actually changed.
+      const error = squashAtomCommandFailure(failed[0]!);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title:
+            failed.length === results.length
+              ? failureTitle
+              : `${failureTitle} (${failed.length} of ${results.length} layers)`,
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    },
+    [memberThreadRefs],
+  );
 
   const stackStatusQuery = useEnvironmentQuery(
     environmentId !== null && group.unavailableReason === null
@@ -160,15 +265,42 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
   const handleContextMenu = useCallback(
     (event: ReactMouseEvent) => {
       event.preventDefault();
-      if (environmentId === null || group.unavailableReason !== null) return;
+      if (environmentId === null) return;
       void (async () => {
         const api = readLocalApi();
         if (!api) return;
-        const items = buildStackRowMenuItems({ layers, busy: props.busy });
+        const items = buildStackRowMenuItems({
+          stackAvailable: group.unavailableReason === null,
+          layers,
+          busy: props.busy,
+          pinningSupported: readEnvironmentSupportsPinning(environmentId),
+          settlementSupported: readEnvironmentSupportsSettlement(environmentId),
+          isPinned: isGroupPinned,
+          isSettled: isGroupSettled,
+        });
+        if (items.length === 0) return;
         const clicked = await settlePromise(() =>
           api.contextMenu.show(items, { x: event.clientX, y: event.clientY }),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
+        if (clicked.value === "pin" || clicked.value === "unpin") {
+          const pin = clicked.value === "pin";
+          void runBulkThreadLifecycleAction(
+            (ref) => (pin ? pinThread(ref) : unpinThread(ref)),
+            pin ? "Stack pinned" : "Stack unpinned",
+            pin ? "Could not pin the stack" : "Could not unpin the stack",
+          );
+          return;
+        }
+        if (clicked.value === "settle" || clicked.value === "unsettle") {
+          const settle = clicked.value === "settle";
+          void runBulkThreadLifecycleAction(
+            (ref) => (settle ? settleThread(ref) : unsettleThread(ref)),
+            settle ? "Stack settled" : "Stack un-settled",
+            settle ? "Could not settle the stack" : "Could not un-settle the stack",
+          );
+          return;
+        }
         if (clicked.value.startsWith("checkout:")) {
           void runStackAction("checkout", clicked.value.slice("checkout:".length));
           return;
@@ -178,7 +310,20 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
         );
       })();
     },
-    [environmentId, group.unavailableReason, layers, props.busy, runStackAction],
+    [
+      environmentId,
+      group.unavailableReason,
+      isGroupPinned,
+      isGroupSettled,
+      layers,
+      pinThread,
+      props.busy,
+      runBulkThreadLifecycleAction,
+      runStackAction,
+      settleThread,
+      unpinThread,
+      unsettleThread,
+    ],
   );
 
   // Same dnd-kit wiring as SidebarThreadRow's `sortableRootProps`: the row
