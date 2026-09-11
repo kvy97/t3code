@@ -20,7 +20,12 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
-import { useProject, useThread, useThreadShellsForProjectRefs } from "../state/entities";
+import {
+  useProject,
+  useServerConfigs,
+  useThread,
+  useThreadShellsForProjectRefs,
+} from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { stackEnvironment } from "../state/stack";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -544,8 +549,12 @@ export const BranchToolbar = memo(function BranchToolbar({
   const [stripElement, setStripElement] = useState<HTMLDivElement | null>(null);
   const labelsOverflow = useLabelsOverflow(stripElement);
 
+  // Absent capability means a server that predates stack.view: opening the
+  // subscription there only produces a failing request.
+  const supportsStackView =
+    useServerConfigs().get(environmentId)?.environment.capabilities.stackView === true;
   const stackStatusQuery = useEnvironmentQuery(
-    activeWorktreePath !== null
+    activeWorktreePath !== null && supportsStackView
       ? stackEnvironment.status({ environmentId, input: { worktreePath: activeWorktreePath } })
       : null,
   );

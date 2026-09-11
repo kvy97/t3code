@@ -2761,6 +2761,11 @@ export default function Sidebar() {
   // still counts toward the worktree's total (it is a second real thread on
   // that worktree), even though buildStackGroups renders it on its own shelf
   // instead of in the group.
+  //
+  // The stackView capability gates the whole feature here, at its root: an
+  // environment whose server predates stack support contributes no worktree,
+  // so no group forms, no row renders, no subscription opens, and its rows
+  // stay individually draggable exactly as before stacks existed.
   const threadsByWorktree = useMemo(() => {
     const byWorktree = new Map<
       string,
@@ -2769,6 +2774,9 @@ export default function Sidebar() {
     const addSection = (list: readonly EnvironmentThreadShell[], section: SidebarSection) => {
       for (const thread of list) {
         if (thread.worktreePath === null) continue;
+        if (serverConfigs.get(thread.environmentId)?.environment.capabilities.stackView !== true) {
+          continue;
+        }
         const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
         const entry = byWorktree.get(thread.worktreePath) ?? {
           environmentId: thread.environmentId,
@@ -2784,7 +2792,7 @@ export default function Sidebar() {
     addSection(settledThreads, "settled");
     // One thread is not a stack; do not subscribe for it.
     return new Map([...byWorktree].filter(([, entry]) => entry.members.length >= 2));
-  }, [activeThreads, pinnedThreads, settledThreads, snoozedThreads]);
+  }, [activeThreads, pinnedThreads, serverConfigs, settledThreads, snoozedThreads]);
 
   // Every thread across every shelf, keyed by scoped key, regardless of
   // whether its row currently renders. Stack-group derivations (the busy

@@ -85,7 +85,7 @@ import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useThreadShells } from "../state/entities";
+import { useProjects, useServerConfigs, useThreadShells } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
@@ -974,9 +974,17 @@ function OpenCommandPaletteDialog(props: {
         thread.worktreePath === activeThreadWorktreePath,
     ).length;
   }, [activeThreadStackEnvironmentId, activeThreadWorktreePath, threads]);
+  // Absent capability means a server that predates stack.view: opening the
+  // subscription there only produces a failing request, and the group must
+  // not offer actions the server cannot run.
+  const serverConfigs = useServerConfigs();
+  const activeThreadSupportsStackView =
+    activeThreadStackEnvironmentId !== null &&
+    serverConfigs.get(activeThreadStackEnvironmentId)?.environment.capabilities.stackView === true;
   const activeThreadStackStatus = useEnvironmentQuery(
     activeThreadStackEnvironmentId !== null &&
       activeThreadWorktreePath !== null &&
+      activeThreadSupportsStackView &&
       activeThreadWorktreeThreadCount >= 2
       ? stackEnvironment.status({
           environmentId: activeThreadStackEnvironmentId,
