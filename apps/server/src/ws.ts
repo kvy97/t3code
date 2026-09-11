@@ -123,6 +123,9 @@ import { readWorkflowScript } from "./orchestration/workflowScriptQuery.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
+import * as StackActionRunner from "./stack/StackActionRunner.ts";
+import * as StackViewBroadcaster from "./stack/StackViewBroadcaster.ts";
+import * as WorktreeTurnGuard from "./stack/WorktreeTurnGuard.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
@@ -517,6 +520,9 @@ const makeWsRpcLayer = (
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const stackViewBroadcaster = yield* StackViewBroadcaster.StackViewBroadcaster;
+      const stackActionRunner = yield* StackActionRunner.StackActionRunner;
+      const worktreeTurnGuard = yield* WorktreeTurnGuard.WorktreeTurnGuard;
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
@@ -1202,22 +1208,39 @@ const makeWsRpcLayer = (
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
-        const dispatchEffect =
-          normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? dispatchBootstrapTurnStart(normalizedCommand)
-            : dispatchFromClient(normalizedCommand).pipe(
-                Effect.tap(({ sequence }) =>
-                  // Returning from thread.create is the handoff point at which
-                  // clients may start resources for the new incarnation. Use
-                  // its event sequence as the exact deletion-cleanup fence.
-                  normalizedCommand.type === "thread.create"
-                    ? threadDeletionReactor.drainThrough(sequence)
-                    : Effect.void,
+        // The guard runs before any event is emitted: a refused turn leaves no
+        // trace in the log, and the client sees the reason it can act on.
+        const guarded =
+          normalizedCommand.type === "thread.turn.start"
+            ? worktreeTurnGuard
+                .ensureReady(normalizedCommand.threadId)
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+                  ),
+                )
+            : Effect.void;
+
+        const dispatchEffect = guarded.pipe(
+          Effect.flatMap(() =>
+            normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
+              ? dispatchBootstrapTurnStart(normalizedCommand)
+              : dispatchFromClient(normalizedCommand).pipe(
+                  Effect.tap(({ sequence }) =>
+                    // Returning from thread.create is the handoff point at which
+                    // clients may start resources for the new incarnation. Use
+                    // its event sequence as the exact deletion-cleanup fence.
+                    normalizedCommand.type === "thread.create"
+                      ? threadDeletionReactor.drainThrough(sequence)
+                      : Effect.void,
+                  ),
+                  Effect.mapError((cause) =>
+                    toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                  ),
                 ),
-                Effect.mapError((cause) =>
-                  toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                ),
-              );
+          ),
+        );
 
         return startup
           .enqueueCommand(dispatchEffect)
@@ -2480,6 +2503,21 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "vcs",
             },
+          ),
+        [WS_METHODS.stackView]: (input) =>
+          observeRpcStream(WS_METHODS.stackView, stackViewBroadcaster.streamStack(input), {
+            "rpc.aggregate": "stack",
+          }),
+        [WS_METHODS.stackAction]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.stackAction,
+            stackActionRunner.run({
+              worktreePath: input.worktreePath,
+              action: input.action,
+              ...(input.branch !== undefined ? { branch: input.branch } : {}),
+              requestedByThreadId: null,
+            }),
+            { "rpc.aggregate": "stack" },
           ),
         [WS_METHODS.vcsPull]: (input) =>
           observeRpcEffect(

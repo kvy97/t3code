@@ -15,6 +15,7 @@ import {
   EnvironmentId,
   EventId,
   GitCommandError,
+  GitManagerError,
   KeybindingRule,
   MessageId,
   ExternalLauncherCommandNotFoundError,
@@ -156,6 +157,10 @@ import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
+import * as GhStackCli from "./stack/GhStackCli.ts";
+import * as StackActionRunner from "./stack/StackActionRunner.ts";
+import * as StackViewBroadcaster from "./stack/StackViewBroadcaster.ts";
+import * as WorktreeTurnGuard from "./stack/WorktreeTurnGuard.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
@@ -516,6 +521,7 @@ const buildAppUnderTest = (options?: {
     >;
     reviewService?: Partial<ReviewService.ReviewService["Service"]>;
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcaster["Service"]>;
+    ghStackCli?: Partial<GhStackCli.GhStackCli["Service"]>;
     projectSetupScriptRunner?: Partial<
       ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]
     >;
@@ -721,6 +727,39 @@ const buildAppUnderTest = (options?: {
           ...options.layers.vcsStatusBroadcaster,
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
+    const ghStackCliLayer = Layer.mock(GhStackCli.GhStackCli)({
+      view: () => Effect.succeed({ _tag: "unavailable", reason: "not-a-stack" }),
+      runAction: () => Effect.succeed({ _tag: "unavailable", reason: "not-a-stack" }),
+      ...options?.layers?.ghStackCli,
+    });
+    // Mirrors `StackLayerLive` in server.ts: only the `gh` boundary is mocked,
+    // so a test exercising the worktree guard sees the real cache/permit
+    // behavior rather than a stand-in that would mask a permit bug. Each
+    // service is privately wired to what it needs (`Layer.provideMerge` does
+    // not thread a dependency to a *later* entry in the same chain), and
+    // `vcsStatusBroadcasterLayer` is folded in here — rather than as a
+    // sibling `.pipe(...)` slot in the big composition below — because that
+    // chain is already at the `.pipe()` overload's 20-argument ceiling.
+    const stackViewBroadcasterLayer = StackViewBroadcaster.layer.pipe(
+      Layer.provide(ghStackCliLayer),
+    );
+    const stackLayer = Layer.mergeAll(
+      ghStackCliLayer,
+      stackViewBroadcasterLayer,
+      // Re-exposed as a sibling (not just provided privately to
+      // `WorktreeTurnGuard` below) because `ws.ts` also acquires
+      // `VcsStatusBroadcaster` directly.
+      vcsStatusBroadcasterLayer,
+      StackActionRunner.layer.pipe(
+        Layer.provide(ghStackCliLayer),
+        Layer.provide(stackViewBroadcasterLayer),
+      ),
+      WorktreeTurnGuard.layer.pipe(
+        Layer.provide(ghStackCliLayer),
+        Layer.provide(stackViewBroadcasterLayer),
+        Layer.provide(vcsStatusBroadcasterLayer),
+      ),
+    );
     const resourceTelemetryLayer = ResourceTelemetry.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -899,7 +938,7 @@ const buildAppUnderTest = (options?: {
           ...options?.layers?.sourceControlRepositoryService,
         }),
       ),
-      Layer.provideMerge(vcsStatusBroadcasterLayer),
+      Layer.provideMerge(stackLayer),
       Layer.provide(
         Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
           runForThread: () => Effect.succeed({ status: "no-script" as const }),
@@ -10269,6 +10308,104 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         error.message,
         "This thread still needs attention. Resolve or interrupt it first, then try again.",
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("refuses thread.turn.start when another thread is running in the same worktree", () =>
+    Effect.gen(function* () {
+      const worktreePath = "/tmp/shared-worktree-guard";
+      const busyThreadId = ThreadId.make("thread-worktree-guard-busy");
+      const idleThreadId = ThreadId.make("thread-worktree-guard-idle");
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+
+      const busyThreadShell = makeDefaultOrchestrationThreadShell({
+        id: busyThreadId,
+        worktreePath,
+        branch: "feature/busy",
+        latestTurn: {
+          turnId: TurnId.make("turn-worktree-guard-busy"),
+          state: "running",
+          requestedAt: "2026-01-01T00:00:00.000Z",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+      });
+      const idleThreadShell = makeDefaultOrchestrationThreadShell({
+        id: idleThreadId,
+        worktreePath,
+        branch: "feature/idle",
+        latestTurn: null,
+      });
+
+      yield* buildAppUnderTest({
+        layers: {
+          vcsStatusBroadcaster: {
+            // The guard reads HEAD/dirtiness for the checkout/dirty checks
+            // and fails open on a read error; the busy check below does
+            // not depend on this at all, so failing here proves the busy
+            // refusal alone is what blocks the turn.
+            getStatus: () =>
+              Effect.fail(
+                new GitManagerError({
+                  operation: "getStatus",
+                  cwd: worktreePath,
+                  detail: "not modeled in this test",
+                }),
+              ),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: (threadId) =>
+              Effect.succeed(
+                threadId === busyThreadId
+                  ? Option.some(busyThreadShell)
+                  : threadId === idleThreadId
+                    ? Option.some(idleThreadShell)
+                    : Option.none(),
+              ),
+            getShellSnapshot: () =>
+              Effect.succeed({
+                snapshotSequence: 0,
+                projects: [],
+                threads: [busyThreadShell, idleThreadShell],
+                updatedAt: "2026-01-01T00:00:00.000Z",
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const error = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-worktree-guard"),
+            threadId: idleThreadId,
+            message: {
+              messageId: MessageId.make("message-worktree-guard"),
+              role: "user",
+              text: "hello",
+              attachments: [],
+            },
+            modelSelection: defaultModelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: "2026-01-01T00:00:00.000Z",
+          }),
+        ).pipe(Effect.flip),
+      );
+
+      assert.equal(error._tag, "OrchestrationDispatchCommandError");
+      assertInclude(error.message, worktreePath);
+      assert.deepEqual(dispatchedCommands, []);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

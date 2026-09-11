@@ -6,6 +6,7 @@ import {
   ApprovalRequestId,
   CodexSettings,
   ProviderDriverKind,
+  StackViewFailedError,
   type OrchestrationEvent,
   type OrchestrationThread,
   type ProviderApprovalDecision,
@@ -84,6 +85,7 @@ import * as WorkspaceEntries from "../src/workspace/WorkspaceEntries.ts";
 import * as WorkspacePaths from "../src/workspace/WorkspacePaths.ts";
 import * as VcsDriverRegistry from "../src/vcs/VcsDriverRegistry.ts";
 import { VcsStatusBroadcaster } from "../src/vcs/VcsStatusBroadcaster.ts";
+import { StackViewBroadcaster } from "../src/stack/StackViewBroadcaster.ts";
 import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
@@ -370,6 +372,26 @@ export const makeOrchestrationIntegrationHarness = (
           refreshPullRequestStatus: () =>
             Effect.die("refreshPullRequestStatus should not be called in this test"),
           streamStatus: () => Stream.empty,
+        }),
+      ),
+      Layer.provideMerge(
+        // `refreshLocalGitStatusFromTurnCompletion` calls this after every
+        // successful turn completion (Signal 2), so it must not die here —
+        // the reactor already tolerates a failure via `Effect.catch`.
+        Layer.succeed(StackViewBroadcaster, {
+          getStack: () => Effect.die("getStack should not be called in this test"),
+          refreshStack: (worktreePath) =>
+            Effect.fail(
+              new StackViewFailedError({
+                worktreePath,
+                detail: "stack view is not modeled in this harness",
+              }),
+            ),
+          refreshStackWithinPermit: () =>
+            Effect.die("refreshStackWithinPermit should not be called in this test"),
+          invalidate: () => Effect.die("invalidate should not be called in this test"),
+          streamStack: () => Stream.die("streamStack should not be called in this test"),
+          withStackPermit: (_worktreePath, effect) => effect,
         }),
       ),
       Layer.provideMerge(

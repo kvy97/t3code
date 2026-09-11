@@ -89,6 +89,10 @@ import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
+import * as GhStackCli from "./stack/GhStackCli.ts";
+import * as StackActionRunner from "./stack/StackActionRunner.ts";
+import * as StackViewBroadcaster from "./stack/StackViewBroadcaster.ts";
+import * as WorktreeTurnGuard from "./stack/WorktreeTurnGuard.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
@@ -364,6 +368,28 @@ const VcsLayerLive = Layer.empty.pipe(
   ),
 );
 
+// `Layer.provideMerge` only feeds the *argument*'s output back to resolve the
+// *receiver*'s outstanding requirements — it does not let an earlier entry in
+// a `.pipe(provideMerge(...), provideMerge(...))` chain satisfy a *later*
+// entry's own dependencies. Each service below is privately wired to the ones
+// it needs before joining the merge, matching how `VcsLayerLive` above
+// resolves `GitWorkflowLayerLive`/`VcsDriverRegistryLayerLive` internally
+// rather than relying on merge order.
+const GhStackCliLive = GhStackCli.layer.pipe(Layer.provide(VcsProcess.layer));
+const StackViewBroadcasterLive = StackViewBroadcaster.layer.pipe(Layer.provide(GhStackCliLive));
+const StackLayerLive = Layer.mergeAll(
+  GhStackCliLive,
+  StackViewBroadcasterLive,
+  StackActionRunner.layer.pipe(
+    Layer.provide(GhStackCliLive),
+    Layer.provide(StackViewBroadcasterLive),
+  ),
+  WorktreeTurnGuard.layer.pipe(
+    Layer.provide(GhStackCliLive),
+    Layer.provide(StackViewBroadcasterLive),
+  ),
+);
+
 const CheckpointingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointDiffQuery.layer),
   Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
@@ -464,6 +490,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
+  Layer.provideMerge(StackLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
