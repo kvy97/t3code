@@ -274,6 +274,62 @@ export function planPinnedReorder(input: {
 }
 
 /**
+ * A stack row moves its whole run of layers in one drop, so it needs N
+ * consecutive keys between the neighbors — not one. Same fallback as the
+ * single-thread path: a keyless neighbor means rewriting the section.
+ */
+export function planPinnedRunReorder(input: {
+  readonly orderedIds: readonly string[];
+  readonly keysById: ReadonlyMap<string, string | null | undefined>;
+  readonly movedIds: readonly string[];
+}): ReadonlyArray<{ readonly id: string; readonly orderKey: string }> {
+  const { orderedIds, keysById, movedIds } = input;
+  if (movedIds.length === 0) return [];
+  if (movedIds.length === 1) {
+    return planPinnedReorder({ orderedIds, keysById, movedId: movedIds[0]! });
+  }
+  const start = orderedIds.indexOf(movedIds[0]!);
+  if (start === -1) return [];
+  const contiguous = movedIds.every((id, offset) => orderedIds[start + offset] === id);
+  if (!contiguous) return [];
+
+  const visibleIds = new Set(orderedIds);
+  const reservedKeys = new Set(
+    [...keysById].flatMap(([id, key]) => (!visibleIds.has(id) && key != null ? [key] : [])),
+  );
+  const beforeId = start > 0 ? orderedIds[start - 1] : null;
+  const afterIndex = start + movedIds.length;
+  const afterId = afterIndex < orderedIds.length ? orderedIds[afterIndex] : null;
+  const beforeKey = beforeId != null ? (keysById.get(beforeId) ?? null) : null;
+  const afterKey = afterId != null ? (keysById.get(afterId) ?? null) : null;
+
+  if ((beforeId === null || beforeKey != null) && (afterId === null || afterKey != null)) {
+    const assignments: Array<{ id: string; orderKey: string }> = [];
+    let cursor = beforeKey;
+    let usable = true;
+    for (const id of movedIds) {
+      let key = pinOrderKeyBetween(cursor, afterKey);
+      while (key !== null && reservedKeys.has(key)) key = pinOrderKeyBetween(key, afterKey);
+      if (key === null) {
+        usable = false;
+        break;
+      }
+      assignments.push({ id, orderKey: key });
+      cursor = key;
+    }
+    if (usable) return assignments;
+  }
+
+  const keys = generateSpreadPinOrderKeys(orderedIds.length + reservedKeys.size)
+    .filter((key) => !reservedKeys.has(key))
+    .slice(0, orderedIds.length);
+  return orderedIds.flatMap((id, index) => {
+    const key = keys[index]!;
+    return keysById.get(id) === key ? [] : [{ id, orderKey: key }];
+  });
+}
+
+/**
  * Pinned block order: user-arranged keys first (string comparison, id
  * tiebreak), then keyless threads newest-created first — so threads on
  * servers that predate reordering keep the static creation order at the

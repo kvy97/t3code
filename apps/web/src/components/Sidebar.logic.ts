@@ -7,7 +7,7 @@ import {
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedRunReorder } from "@t3tools/client-runtime/state/thread-sort";
 import {
   getThreadSortTimestamp,
   resolveSettledThreadTimestamp,
@@ -225,6 +225,9 @@ export function resolveSidebarDropVerb(
 
 export function planSidebarThreadDrop(input: {
   readonly activeKey: string;
+  /** The contiguous run this drop moves. A stack row moves all its layers;
+      anything else moves the one row and defaults to `[activeKey]`. */
+  readonly activeRunKeys?: readonly string[];
   readonly activeSection: SidebarSection;
   /** Snoozed threads can retain pinning and settlement beneath the shelf. */
   readonly activePinned?: boolean;
@@ -241,6 +244,7 @@ export function planSidebarThreadDrop(input: {
 }): SidebarThreadDropPlan {
   const {
     activeKey,
+    activeRunKeys = [input.activeKey],
     activeSection,
     activePinned = activeSection === "pinned",
     activeSettled = activeSection === "settled",
@@ -265,10 +269,10 @@ export function planSidebarThreadDrop(input: {
       ) {
         return { kind: "none" };
       }
-      const assignments = planPinnedReorder({
+      const assignments = planPinnedRunReorder({
         orderedIds: order,
         keysById: activeKeysById,
-        movedId: activeKey,
+        movedIds: activeRunKeys,
       });
       if (activeReorderableKeys && assignments.some(({ id }) => !activeReorderableKeys.has(id))) {
         return { kind: "none" };
@@ -294,10 +298,10 @@ export function planSidebarThreadDrop(input: {
       ) {
         return { kind: "none" };
       }
-      const assignments = planPinnedReorder({
+      const assignments = planPinnedRunReorder({
         orderedIds: order,
         keysById: pinnedKeysById,
-        movedId: activeKey,
+        movedIds: activeRunKeys,
       });
       if (reorderableKeys && assignments.some(({ id }) => !reorderableKeys.has(id))) {
         return { kind: "none" };

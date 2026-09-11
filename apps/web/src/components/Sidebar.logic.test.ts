@@ -1523,6 +1523,37 @@ describe("planSidebarThreadDrop", () => {
       }),
     ).toEqual({ kind: "none" });
   });
+
+  it("writes an order key for every member when a stack row is dropped", () => {
+    // Keys must be valid base-26 pin-order keys (see PIN_ORDER_DIGITS in
+    // threadSort.ts) — an invalid-format neighbor key forces the rewrite
+    // fallback and would defeat this case's assertion on exactly 2 ids.
+    const result = planSidebarThreadDrop({
+      activeKey: "e1:t-base",
+      activeRunKeys: ["e1:t-base", "e1:t-top"],
+      activeSection: "active",
+      target: {
+        section: "active",
+        pinnedOrder: [],
+        activeOrder: ["e1:t-other", "e1:t-base", "e1:t-top"],
+      },
+      pinnedOrder: [],
+      pinnedKeysById: new Map(),
+      activeOrder: ["e1:t-base", "e1:t-top", "e1:t-other"],
+      activeKeysById: new Map([
+        ["e1:t-other", "f"],
+        ["e1:t-base", "m"],
+        ["e1:t-top", "t"],
+      ]),
+    });
+
+    expect(result.kind).toBe("move-active");
+    if (result.kind !== "move-active") return;
+    expect(result.assignments.map((assignment) => assignment.id)).toEqual([
+      "e1:t-base",
+      "e1:t-top",
+    ]);
+  });
 });
 
 describe("applySidebarThreadDrop", () => {
