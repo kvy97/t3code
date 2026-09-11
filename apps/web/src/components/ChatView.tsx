@@ -367,6 +367,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   agentControlledBrowserCloseConfirmation,
   branchMismatchKey,
+  buildCheckpointRevertConfirmMessage,
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
@@ -376,6 +377,7 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
+  findStackRebaseBoundaryAfter,
   hasEnvironmentReconnectWarningGraceElapsed,
   latestTurnStartFailureId,
   scheduleEnvironmentReconnectWarning,
@@ -6327,11 +6329,16 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const confirmed = await localApi.dialogs.confirm(
-        [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
-        ].join("\n"),
+        buildCheckpointRevertConfirmMessage({
+          turnCount,
+          rebaseBoundary: findStackRebaseBoundaryAfter({
+            activities: activeThread.activities,
+            checkpointCompletedAt:
+              activeThread.checkpoints.find(
+                (checkpoint) => checkpoint.checkpointTurnCount === turnCount,
+              )?.completedAt ?? null,
+          }),
+        }),
         { variant: "destructive" },
       );
       if (!confirmed) {

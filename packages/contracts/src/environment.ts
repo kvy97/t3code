@@ -125,6 +125,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadTitleRegeneration: Schema.optionalKey(Schema.Boolean),
   /** Server persists a pull request reference on thread.meta.update. */
   threadPullRequestLinking: Schema.optionalKey(Schema.Boolean),
+  /** Server serves stack.view and stack.action, backed by the gh stack
+      extension. Same version-skew contract as threadSettlement: absent
+      means unsupported, so clients neither open the subscription nor group
+      a worktree's threads into a stack run. */
+  stackView: Schema.optionalKey(Schema.Boolean),
   /** The update path clients should offer for this server. Absent on
       servers that must be relaunched manually (dev checkouts, Windows
       foreground runs, pre-update servers). */

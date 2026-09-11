@@ -36,6 +36,7 @@ import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
+import { StackViewBroadcaster } from "../../stack/StackViewBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as PullRequestService from "../../pullRequest/PullRequestService.ts";
 
@@ -88,6 +89,7 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const stackViewBroadcaster = yield* StackViewBroadcaster;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const startedTurns = new Map<ThreadId, TurnId>();
   const pending = new Set<ThreadId>();
@@ -505,6 +507,18 @@ const make = Effect.gen(function* () {
         cwd: sessionRuntime.value.cwd,
         local,
       });
+      // Signal 2: an agent that ran `gh stack add` or `gh stack sync` inside
+      // the worktree changed the chain, and the turn end is the one moment
+      // T3 knows to look.
+      yield* stackViewBroadcaster.refreshStack(sessionRuntime.value.cwd).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to refresh stack after turn completion", {
+            threadId: event.threadId,
+            cwd: sessionRuntime.value.cwd,
+            detail: error.message,
+          }),
+        ),
+      );
     }
   });
 

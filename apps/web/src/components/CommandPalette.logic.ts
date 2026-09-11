@@ -1,6 +1,8 @@
 import {
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type StackActionKind,
+  type StackActionResult,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
@@ -12,6 +14,7 @@ import { sortThreads } from "../lib/threadSort";
 import { normalizeSearchText } from "../lib/utils";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
+import type { StackGroup } from "./Sidebar.stack.logic";
 
 export const RECENT_THREAD_LIMIT = 12;
 export const ITEM_ICON_CLASS = "size-4 text-icon-muted";
@@ -160,6 +163,76 @@ export function buildProjectActionItems(input: {
       await input.runProject(project);
     },
   }));
+}
+
+const STACK_PALETTE_ACTIONS: ReadonlyArray<{
+  readonly action: Extract<StackActionKind, "submit" | "sync" | "rebaseUpstack" | "merge">;
+  readonly title: string;
+  readonly description: string;
+}> = [
+  {
+    action: "submit",
+    title: "Submit stack",
+    description: "Push every branch and open or update its PR",
+  },
+  { action: "sync", title: "Sync stack", description: "Fetch, rebase onto the trunk, and push" },
+  {
+    action: "rebaseUpstack",
+    title: "Rebase upstack",
+    description: "Rebase this layer and everything above it",
+  },
+  {
+    action: "merge",
+    title: "Merge stack",
+    description: "Merge the stack, or queue it when the base has a merge queue",
+  },
+];
+
+/** `checkout` and `addLayer` are per-layer and belong on the row and the
+    branch toolbar; the palette carries the four whole-stack actions. */
+export function buildStackActionItems(input: {
+  readonly group: StackGroup;
+  readonly worktreeLabel: string;
+  readonly icon: ReactNode;
+  readonly runAction: (action: StackActionKind) => Promise<void>;
+}): CommandPaletteActionItem[] {
+  // Loading and failed reads offer nothing either: the four actions only
+  // exist once the chain actually read back.
+  if (input.group.availability !== "available") return [];
+  return STACK_PALETTE_ACTIONS.map((entry) => ({
+    kind: "action" as const,
+    value: `stack:${input.group.worktreePath}:${entry.action}`,
+    searchTerms: [
+      entry.title,
+      input.worktreeLabel,
+      ...(input.group.stackNumber === null ? [] : [String(input.group.stackNumber)]),
+    ],
+    title: entry.title,
+    description: entry.description,
+    icon: input.icon,
+    run: async () => {
+      await input.runAction(entry.action);
+    },
+  }));
+}
+
+/** A merge queue takes the stack and lands it later. Reporting "merged" is a
+    lie the user reads as done, so the two outcomes get different copy. */
+export function describeStackActionResult(result: StackActionResult): string {
+  switch (result.action) {
+    case "merge":
+      return result.mergeDisposition === "queued" ? "Stack queued for merge" : "Stack merged";
+    case "submit":
+      return "Stack submitted";
+    case "sync":
+      return "Stack synced";
+    case "rebaseUpstack":
+      return "Stack rebased";
+    case "checkout":
+      return "Layer checked out";
+    case "addLayer":
+      return "Layer added";
+  }
 }
 
 export type BuildThreadActionItemsThread = Pick<
@@ -446,10 +519,14 @@ export function getCommandPaletteMode(input: {
 export function buildRootGroups(input: {
   actionItems: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
   recentThreadItems: ReadonlyArray<CommandPaletteActionItem>;
+  stackActionItems?: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
   const groups: CommandPaletteGroup[] = [];
   if (input.actionItems.length > 0) {
     groups.push({ value: "actions", label: "Actions", items: input.actionItems });
+  }
+  if (input.stackActionItems && input.stackActionItems.length > 0) {
+    groups.push({ value: "stack", label: "Stack", items: input.stackActionItems });
   }
   if (input.recentThreadItems.length > 0) {
     groups.push({

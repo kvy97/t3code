@@ -5,6 +5,7 @@ import {
   pinOrderKeyBetween,
   planPinnedMove,
   planPinnedReorder,
+  planPinnedRunReorder,
   resolveSettledThreadTimestamp,
   sortActiveThreadsByOrderKey,
   sortPinnedThreadsByOrderKey,
@@ -347,5 +348,94 @@ describe("sortActiveThreadsByOrderKey", () => {
     const keys = new Map(assignments.map((assignment) => [assignment.id, assignment.orderKey]));
     const updated = threads.map((thread) => ({ ...thread, activeOrderKey: keys.get(thread.id) }));
     expect(sortActiveThreadsByOrderKey(updated).map((thread) => thread.id)).toEqual(orderedIds);
+  });
+});
+
+describe("planPinnedRunReorder", () => {
+  it("writes one key per moved member, in run order", () => {
+    // Order keys are single base-26 digits (see PIN_ORDER_DIGITS) — "10"/"90"
+    // style numeric strings are not valid keys and would force the rewrite
+    // fallback below, defeating what this case means to check.
+    const assignments = planPinnedRunReorder({
+      orderedIds: ["a", "r1", "r2", "b"],
+      keysById: new Map([
+        ["a", "f"],
+        ["r1", "m"],
+        ["r2", "n"],
+        ["b", "t"],
+      ]),
+      movedIds: ["r1", "r2"],
+    });
+
+    expect(assignments.map((assignment) => assignment.id)).toEqual(["r1", "r2"]);
+    const [first, second] = assignments;
+    expect(first!.orderKey > "f").toBe(true);
+    expect(second!.orderKey > first!.orderKey).toBe(true);
+    expect(second!.orderKey < "t").toBe(true);
+  });
+
+  it("rewrites the section when a neighbor has no key", () => {
+    const assignments = planPinnedRunReorder({
+      orderedIds: ["a", "r1", "r2"],
+      keysById: new Map([["r1", "50"]]),
+      movedIds: ["r1", "r2"],
+    });
+
+    expect(assignments.map((assignment) => assignment.id)).toEqual(["a", "r1", "r2"]);
+  });
+
+  it("returns nothing when the run is not contiguous", () => {
+    const assignments = planPinnedRunReorder({
+      orderedIds: ["r1", "a", "r2"],
+      keysById: new Map([
+        ["r1", "10"],
+        ["a", "50"],
+        ["r2", "90"],
+      ]),
+      movedIds: ["r1", "r2"],
+    });
+
+    expect(assignments).toEqual([]);
+  });
+
+  it("assigns keys to every moved id, even ones a collapsed group hides from orderedIds", () => {
+    // Mirrors dragging a collapsed stack row: "base" and "top" are real run
+    // members but neither one renders while the group is collapsed, so
+    // orderedIds (built from rendered rows only) carries just "mid".
+    const assignments = planPinnedRunReorder({
+      orderedIds: ["a", "mid", "b"],
+      keysById: new Map([
+        ["a", "f"],
+        ["b", "t"],
+      ]),
+      movedIds: ["base", "mid", "top"],
+    });
+
+    expect(assignments.map((assignment) => assignment.id)).toEqual(["base", "mid", "top"]);
+    const [first, second, third] = assignments;
+    expect(first!.orderKey > "f").toBe(true);
+    expect(second!.orderKey > first!.orderKey).toBe(true);
+    expect(third!.orderKey > second!.orderKey).toBe(true);
+    expect(third!.orderKey < "t").toBe(true);
+  });
+
+  it("returns nothing when present members aren't contiguous, even with valid keys throughout", () => {
+    // r2 is hidden (never in orderedIds); r1 and r3 are both present, but "a"
+    // — a row nobody is moving — sits between them, so the present block
+    // isn't contiguous. Every key here is valid base-26: if contiguity were
+    // skipped, r1 and r3 would resolve as usable (null-bounded) anchors and
+    // this would return three real assignments instead of [] — this fixture
+    // fails for the contiguity check specifically, not incidentally.
+    const assignments = planPinnedRunReorder({
+      orderedIds: ["r1", "a", "r3"],
+      keysById: new Map([
+        ["r1", "f"],
+        ["a", "m"],
+        ["r3", "t"],
+      ]),
+      movedIds: ["r1", "r2", "r3"],
+    });
+
+    expect(assignments).toEqual([]);
   });
 });

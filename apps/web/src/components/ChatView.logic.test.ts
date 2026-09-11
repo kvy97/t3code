@@ -30,6 +30,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   agentControlledBrowserCloseConfirmation,
   branchMismatchKey,
+  buildCheckpointRevertConfirmMessage,
   buildExpiredTerminalContextToastCopy,
   buildLoadingThreadFromShell,
   buildRunningThreadTurnInterruptInput,
@@ -39,6 +40,7 @@ import {
   deriveLockedProvider,
   dismissBranchMismatchForSession,
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
+  findStackRebaseBoundaryAfter,
   getAntigravitySendBlockReason,
   getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
@@ -1956,5 +1958,69 @@ describe("shouldRefocusComposerOnWindowFocus", () => {
   it("leaves focus inside a dialog or popup alone", () => {
     expect(shouldRefocusComposerOnWindowFocus(element("BUTTON", { within: "dialog" }))).toBe(false);
     expect(shouldRefocusComposerOnWindowFocus(element("BUTTON", { within: "-popup" }))).toBe(false);
+  });
+});
+
+describe("findStackRebaseBoundaryAfter", () => {
+  const activities = [
+    {
+      kind: "stack.rebased",
+      createdAt: "2026-09-09T12:00:00.000Z",
+      summary: "Stack rebased onto main",
+    },
+    {
+      kind: "setup-script.requested",
+      createdAt: "2026-09-09T13:00:00.000Z",
+      summary: "Starting setup script",
+    },
+  ];
+
+  it("finds a boundary written after the checkpoint", () => {
+    const boundary = findStackRebaseBoundaryAfter({
+      activities,
+      checkpointCompletedAt: "2026-09-09T11:00:00.000Z",
+    });
+
+    expect(boundary?.summary).toBe("Stack rebased onto main");
+  });
+
+  it("ignores a boundary that predates the checkpoint", () => {
+    expect(
+      findStackRebaseBoundaryAfter({
+        activities,
+        checkpointCompletedAt: "2026-09-09T14:00:00.000Z",
+      }),
+    ).toBeNull();
+  });
+
+  it("ignores activities that are not boundaries", () => {
+    expect(
+      findStackRebaseBoundaryAfter({
+        activities: [activities[1]!],
+        checkpointCompletedAt: "2026-09-09T11:00:00.000Z",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("buildCheckpointRevertConfirmMessage", () => {
+  it("keeps the existing copy when no rebase intervened", () => {
+    expect(buildCheckpointRevertConfirmMessage({ turnCount: 4, rebaseBoundary: null })).toBe(
+      [
+        "Revert this thread to checkpoint 4?",
+        "This will discard newer messages and turn diffs in this thread.",
+        "This action cannot be undone.",
+      ].join("\n"),
+    );
+  });
+
+  it("states the reason when a rebase crossed the checkpoint", () => {
+    const message = buildCheckpointRevertConfirmMessage({
+      turnCount: 4,
+      rebaseBoundary: { summary: "Stack rebased onto main" },
+    });
+
+    expect(message).toContain("Stack rebased onto main");
+    expect(message).toContain("mixes work the rebase brought in");
   });
 });

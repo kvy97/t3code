@@ -51,6 +51,11 @@ import {
   resolveSidebarDropVerb,
 } from "./Sidebar.logic";
 import {
+  buildStackGroups,
+  insertStackGroupsIntoSidebarItems,
+  stackMarkerId,
+} from "./Sidebar.stack.logic";
+import {
   EnvironmentId,
   OrchestrationLatestTurn,
   ProjectId,
@@ -1189,6 +1194,61 @@ describe("resolveSidebarDropTarget", () => {
     expect(resolve("nope", "a1")).toBeNull();
     expect(resolve(sidebarMarkerId("pinned-divider"), "a1")).toBeNull();
   });
+
+  it("moves a stack row's whole run, not just its marker", () => {
+    // Pinned p1 | Active a1, [stack m1 m2], a2 — built the way the sidebar
+    // builds it, so a2 sits directly below the run with no marker between.
+    const withStack = insertStackGroupsIntoSidebarItems({
+      items: [
+        marker("pinned-header"),
+        thread("p1", "pinned"),
+        marker("pinned-divider"),
+        thread("a1", "active"),
+        thread("m1", "active"),
+        thread("m2", "active"),
+        thread("a2", "active"),
+        marker("settled-header"),
+      ],
+      groups: buildStackGroups([
+        {
+          worktreePath: "/repo/wt",
+          status: null,
+          members: [
+            { key: "m1", branch: "base", section: "active" },
+            { key: "m2", branch: "top", section: "active" },
+          ],
+          collapsed: false,
+          checkedOutBranch: null,
+          routeKey: null,
+        },
+      ]),
+    });
+    const stack = stackMarkerId("/repo/wt");
+    // Up, onto the row above the run: the run lands above it.
+    expect(resolveSidebarDropTarget(withStack, stack, "a1")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["m1", "m2", "a1", "a2"],
+    });
+    // Down, past the run's own slots: the run lands below the hovered row.
+    expect(resolveSidebarDropTarget(withStack, stack, "a2")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["a1", "a2", "m1", "m2"],
+    });
+    // Across the divider: the whole run is pinned, in run order.
+    expect(resolveSidebarDropTarget(withStack, stack, "p1")).toEqual({
+      section: "pinned",
+      pinnedOrder: ["m1", "m2", "p1"],
+      activeOrder: ["a1", "a2"],
+    });
+    // Hovering one of its own members changes nothing.
+    expect(resolveSidebarDropTarget(withStack, stack, "m2")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["a1", "m1", "m2", "a2"],
+    });
+  });
 });
 
 describe("planSidebarThreadDrop", () => {
@@ -1522,6 +1582,124 @@ describe("planSidebarThreadDrop", () => {
         target: { section: "pinned", pinnedOrder: ["p1", "p2", "p3"] },
       }),
     ).toEqual({ kind: "none" });
+  });
+
+  // Both stack cases resolve their target with the real
+  // resolveSidebarDropTarget, from the list shape the sidebar actually
+  // builds — a stack marker followed by its contiguous member rows. A
+  // hand-written target passes even when the resolver leaves the run where
+  // it was, which is precisely the failure these guard against.
+  describe("stack run drops", () => {
+    const stackKey = stackMarkerId("/repo/wt");
+    // Keys must be valid base-26 pin-order keys (see PIN_ORDER_DIGITS in
+    // threadSort.ts) — an invalid-format neighbor key forces the rewrite
+    // fallback and would defeat these cases' assertions on exactly 2 ids.
+    const activeKeysById = new Map([
+      ["e1:t-other", "f"],
+      ["e1:t-base", "m"],
+      ["e1:t-top", "t"],
+    ]);
+    const groups = buildStackGroups([
+      {
+        worktreePath: "/repo/wt",
+        status: null,
+        members: [
+          { key: "e1:t-base", branch: "base", section: "active" },
+          { key: "e1:t-top", branch: "top", section: "active" },
+        ],
+        collapsed: false,
+        checkedOutBranch: null,
+        routeKey: null,
+      },
+    ]);
+
+    it("writes an order key for every member when a stack row is dropped in the inbox", () => {
+      const items = insertStackGroupsIntoSidebarItems({
+        items: [
+          { kind: "marker", marker: "pinned-header" },
+          { kind: "marker", marker: "pinned-divider" },
+          { kind: "thread", key: "e1:t-other", section: "active" },
+          { kind: "thread", key: "e1:t-base", section: "active" },
+          { kind: "thread", key: "e1:t-top", section: "active" },
+          { kind: "marker", marker: "settled-header" },
+        ],
+        groups,
+      });
+      const target = resolveSidebarDropTarget(items, stackKey, "e1:t-other");
+      expect(target).toEqual({
+        section: "active",
+        pinnedOrder: [],
+        activeOrder: ["e1:t-base", "e1:t-top", "e1:t-other"],
+      });
+      if (target === null) return;
+
+      const result = planSidebarThreadDrop({
+        activeKey: "e1:t-base",
+        activeRunKeys: ["e1:t-base", "e1:t-top"],
+        activeSection: "active",
+        target,
+        pinnedOrder: [],
+        pinnedKeysById: new Map(),
+        activeOrder: ["e1:t-other", "e1:t-base", "e1:t-top"],
+        activeKeysById,
+      });
+
+      expect(result.kind).toBe("move-active");
+      if (result.kind !== "move-active") return;
+      expect(result.assignments.map((assignment) => assignment.id)).toEqual([
+        "e1:t-base",
+        "e1:t-top",
+      ]);
+    });
+
+    it("pins every stack member when reorderableKeys is the server-capability set, not the pickup set", () => {
+      // reorderableKeys here stands in for the real caller's
+      // draggableThreadKeys (the server-capability set): it must contain every
+      // run member, because pinning the run writes an orderKey to each one. A
+      // caller that instead passed the row-pickup set (which excludes every
+      // stack member by construction, since only the marker can be picked up)
+      // would trip this branch's guard on every id in the run and silently
+      // discard the drop — see planSidebarThreadDrop's "pinned" case.
+      const items = insertStackGroupsIntoSidebarItems({
+        items: [
+          { kind: "marker", marker: "pinned-header" },
+          { kind: "thread", key: "e1:p1", section: "pinned" },
+          { kind: "marker", marker: "pinned-divider" },
+          { kind: "thread", key: "e1:t-other", section: "active" },
+          { kind: "thread", key: "e1:t-base", section: "active" },
+          { kind: "thread", key: "e1:t-top", section: "active" },
+          { kind: "marker", marker: "settled-header" },
+        ],
+        groups,
+      });
+      const target = resolveSidebarDropTarget(items, stackKey, "e1:p1");
+      expect(target).toEqual({
+        section: "pinned",
+        pinnedOrder: ["e1:t-base", "e1:t-top", "e1:p1"],
+        activeOrder: ["e1:t-other"],
+      });
+      if (target === null) return;
+
+      const result = planSidebarThreadDrop({
+        activeKey: "e1:t-base",
+        activeRunKeys: ["e1:t-base", "e1:t-top"],
+        activeSection: "active",
+        target,
+        pinnedOrder: ["e1:p1"],
+        pinnedKeysById: new Map([["e1:p1", "t"]]),
+        reorderableKeys: new Set(["e1:p1", "e1:t-other", "e1:t-base", "e1:t-top"]),
+        activeOrder: ["e1:t-other", "e1:t-base", "e1:t-top"],
+        activeKeysById,
+      });
+
+      expect(result.kind).toBe("pin");
+      if (result.kind !== "pin") return;
+      const assignedIds = [
+        ...(result.orderKey === undefined ? [] : ["e1:t-base"]),
+        ...result.extraAssignments.map((assignment) => assignment.id),
+      ];
+      expect(assignedIds).toEqual(["e1:t-base", "e1:t-top"]);
+    });
   });
 });
 

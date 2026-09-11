@@ -32,17 +32,21 @@ import {
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
+  type StackActionKind,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
+  StackActionConflictedError,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import {
   ArrowLeftIcon,
   CornerLeftUpIcon,
   FileSearchIcon,
   FolderIcon,
   FolderPlusIcon,
+  LayersIcon,
   LinkIcon,
   MessageSquareIcon,
   PaletteIcon,
@@ -75,12 +79,13 @@ import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment } from "../state/filesystem";
 import { projectEnvironment } from "../state/projects";
+import { stackEnvironment } from "../state/stack";
 import { useEnvironmentQuery } from "../state/query";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useThreadShells } from "../state/entities";
+import { useProjects, useServerConfigs, useThreadShells } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
@@ -125,7 +130,9 @@ import {
   buildBrowseGroups,
   buildProjectActionItems,
   buildRootGroups,
+  buildStackActionItems,
   buildThreadActionItems,
+  describeStackActionResult,
   enumerateCommandPaletteItems,
   type CommandPaletteActionItem,
   type CommandPaletteOpenIntent,
@@ -141,6 +148,7 @@ import {
   type SearchOverlayMode,
 } from "./CommandPalette.logic";
 import { orderItemsByPreferredIds, sortLogicalProjectsForSidebar } from "./Sidebar.logic";
+import { resolveStackRowLabel, type StackGroup } from "./Sidebar.stack.logic";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteContent } from "./CommandPaletteContent";
 import { CommandPaletteResults } from "./CommandPaletteResults";
@@ -953,6 +961,112 @@ function OpenCommandPaletteDialog(props: {
   const currentProjectCwd = currentProjectId
     ? (projectCwdById.get(currentProjectId) ?? null)
     : null;
+
+  // A stack needs at least two threads sharing the worktree — a lone thread
+  // on a branch is not a run worth offering whole-stack actions for.
+  const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
+  const activeThreadStackEnvironmentId = activeThread?.environmentId ?? null;
+  const activeThreadWorktreeThreadCount = useMemo(() => {
+    if (activeThreadWorktreePath === null || activeThreadStackEnvironmentId === null) return 0;
+    return threads.filter(
+      (thread) =>
+        thread.environmentId === activeThreadStackEnvironmentId &&
+        thread.worktreePath === activeThreadWorktreePath,
+    ).length;
+  }, [activeThreadStackEnvironmentId, activeThreadWorktreePath, threads]);
+  // Absent capability means a server that predates stack.view: opening the
+  // subscription there only produces a failing request, and the group must
+  // not offer actions the server cannot run.
+  const serverConfigs = useServerConfigs();
+  const activeThreadSupportsStackView =
+    activeThreadStackEnvironmentId !== null &&
+    serverConfigs.get(activeThreadStackEnvironmentId)?.environment.capabilities.stackView === true;
+  const activeThreadStackStatus = useEnvironmentQuery(
+    activeThreadStackEnvironmentId !== null &&
+      activeThreadWorktreePath !== null &&
+      activeThreadSupportsStackView &&
+      activeThreadWorktreeThreadCount >= 2
+      ? stackEnvironment.status({
+          environmentId: activeThreadStackEnvironmentId,
+          input: { worktreePath: activeThreadWorktreePath },
+        })
+      : null,
+  ).data;
+  const runStackActionCommand = useAtomCommand(
+    stackEnvironment.runAction,
+    "command-palette:stack-action",
+  );
+  const runActiveThreadStackAction = useCallback(
+    async (action: StackActionKind) => {
+      if (activeThreadStackEnvironmentId === null || activeThreadWorktreePath === null) return;
+      const result = await runStackActionCommand({
+        environmentId: activeThreadStackEnvironmentId,
+        input: { worktreePath: activeThreadWorktreePath, action },
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        // Conflict resolution stays out of the UI: point at the terminal for
+        // the thread whose branch is checked out and let the user resolve it
+        // there. The active thread is the one this palette action ran from.
+        if (Schema.is(StackActionConflictedError)(error) && activeThread) {
+          useTerminalUiStateStore
+            .getState()
+            .setTerminalOpen(scopeThreadRef(activeThread.environmentId, activeThread.id), true);
+        }
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Stack action failed",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: describeStackActionResult(result.value),
+        }),
+      );
+    },
+    [activeThread, activeThreadStackEnvironmentId, activeThreadWorktreePath, runStackActionCommand],
+  );
+  const stackActionItems = useMemo(() => {
+    if (activeThreadWorktreePath === null || activeThreadWorktreeThreadCount < 2) return [];
+    if (activeThreadStackStatus === null) return [];
+    const group: StackGroup = {
+      worktreePath: activeThreadWorktreePath,
+      section: "active",
+      memberKeys: [],
+      visibleMemberKeys: [],
+      hiddenMemberKeys: [],
+      layerCount:
+        activeThreadStackStatus._tag === "available" ? activeThreadStackStatus.layers.length : 0,
+      stackNumber:
+        activeThreadStackStatus._tag === "available" ? activeThreadStackStatus.stackNumber : null,
+      memberCount: activeThreadWorktreeThreadCount,
+      unavailableReason:
+        activeThreadStackStatus._tag === "unavailable" ? activeThreadStackStatus.reason : null,
+      availability: activeThreadStackStatus._tag,
+    };
+    return buildStackActionItems({
+      group,
+      worktreeLabel: resolveStackRowLabel({
+        worktreePath: activeThreadWorktreePath,
+        bottomBranch: activeThread?.branch ?? null,
+      }),
+      icon: <LayersIcon className={ITEM_ICON_CLASS} />,
+      runAction: runActiveThreadStackAction,
+    });
+  }, [
+    activeThread?.branch,
+    activeThreadStackStatus,
+    activeThreadWorktreePath,
+    activeThreadWorktreeThreadCount,
+    runActiveThreadStackAction,
+  ]);
+
   const currentProjectCwdForBrowse =
     browseEnvironmentId && currentProjectEnvironmentId === browseEnvironmentId
       ? currentProjectCwd
@@ -1754,7 +1868,7 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
-  const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
+  const rootGroups = buildRootGroups({ actionItems, recentThreadItems, stackActionItems });
   const settingsSearchItems: CommandPaletteActionItem[] = searchSettings(
     deferredQuery,
     availableSettingsSearchItems,

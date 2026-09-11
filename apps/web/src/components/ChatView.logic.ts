@@ -14,6 +14,7 @@ import {
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
+  STACK_REBASE_ACTIVITY_KIND,
   type ThreadId,
   type ThreadLinkedPullRequest,
   type TurnId,
@@ -1062,4 +1063,42 @@ export function shouldRefocusComposerOnWindowFocus(
       '[role="dialog"], [role="alertdialog"], [data-slot$="-popup"], [data-terminal-owner]',
     ) === null
   );
+}
+
+/**
+ * A rebase dangles nothing — a checkpoint is a ref — but it changes what a
+ * pre-rebase checkpoint means, so a restore across one needs the reason on
+ * screen. A rebase run outside T3 sets no boundary: the same hole as the
+ * cache invalidation, not a new one.
+ */
+export function findStackRebaseBoundaryAfter(input: {
+  readonly activities: ReadonlyArray<{
+    readonly kind: string;
+    readonly createdAt: string;
+    readonly summary: string;
+  }>;
+  readonly checkpointCompletedAt: string | null;
+}): { readonly summary: string } | null {
+  const completedAt = input.checkpointCompletedAt;
+  if (completedAt === null) return null;
+  const boundary = input.activities.find(
+    (activity) => activity.kind === STACK_REBASE_ACTIVITY_KIND && activity.createdAt > completedAt,
+  );
+  return boundary === undefined ? null : { summary: boundary.summary };
+}
+
+export function buildCheckpointRevertConfirmMessage(input: {
+  readonly turnCount: number;
+  readonly rebaseBoundary: { readonly summary: string } | null;
+}): string {
+  return [
+    `Revert this thread to checkpoint ${input.turnCount}?`,
+    "This will discard newer messages and turn diffs in this thread.",
+    ...(input.rebaseBoundary === null
+      ? []
+      : [
+          `${input.rebaseBoundary.summary} after this checkpoint, so its diff mixes work the rebase brought in from the layers below.`,
+        ]),
+    "This action cannot be undone.",
+  ].join("\n");
 }

@@ -3,7 +3,9 @@ import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools
 import type { Thread } from "../types";
 import {
   buildBrowseGroups,
+  buildStackActionItems,
   buildThreadActionItems,
+  describeStackActionResult,
   enumerateCommandPaletteItems,
   filterPinnedBrowseEntries,
   filterCommandPaletteGroups,
@@ -468,5 +470,90 @@ describe("filterPinnedBrowseEntries", () => {
       visibleEntries: windowsEntries,
       exactEntry: windowsEntries[0],
     });
+  });
+});
+
+describe("buildStackActionItems", () => {
+  const group = {
+    worktreePath: "/repo/wt",
+    section: "active",
+    memberKeys: ["e1:t-base", "e1:t-top"],
+    visibleMemberKeys: ["e1:t-base", "e1:t-top"],
+    hiddenMemberKeys: [],
+    layerCount: 2,
+    stackNumber: 7,
+    memberCount: 2,
+    unavailableReason: null,
+    availability: "available",
+  } as const;
+
+  it("offers the four whole-stack actions", async () => {
+    const ran: string[] = [];
+    const items = buildStackActionItems({
+      group,
+      worktreeLabel: "wt",
+      icon: null,
+      runAction: async (action) => {
+        ran.push(action);
+      },
+    });
+
+    expect(items.map((item) => item.value)).toEqual([
+      "stack:/repo/wt:submit",
+      "stack:/repo/wt:sync",
+      "stack:/repo/wt:rebaseUpstack",
+      "stack:/repo/wt:merge",
+    ]);
+    await items[1]!.run();
+    expect(ran).toEqual(["sync"]);
+  });
+
+  it("offers nothing when the stack backend is unavailable", () => {
+    const items = buildStackActionItems({
+      group: { ...group, unavailableReason: "gh-missing", availability: "unavailable" },
+      worktreeLabel: "wt",
+      icon: null,
+      runAction: async () => {},
+    });
+
+    expect(items).toEqual([]);
+  });
+
+  it("offers nothing while the read is in flight or after it failed", () => {
+    // `unavailableReason` stays null in both states, so a gate reading it
+    // alone would hand the user four actions for a chain nobody has read.
+    for (const availability of ["loading", "failed"] as const) {
+      expect(
+        buildStackActionItems({
+          group: { ...group, availability },
+          worktreeLabel: "wt",
+          icon: null,
+          runAction: async () => {},
+        }),
+      ).toEqual([]);
+    }
+  });
+
+  it("finds an action by the stack number and the worktree name", () => {
+    const [submit] = buildStackActionItems({
+      group,
+      worktreeLabel: "wt",
+      icon: null,
+      runAction: async () => {},
+    });
+
+    expect(submit!.searchTerms).toContain("wt");
+    expect(submit!.searchTerms).toContain("7");
+  });
+});
+
+describe("describeStackActionResult", () => {
+  it("distinguishes a queued stack from a merged one", () => {
+    expect(describeStackActionResult({ action: "merge", mergeDisposition: "queued" })).toBe(
+      "Stack queued for merge",
+    );
+    expect(describeStackActionResult({ action: "merge", mergeDisposition: "merged" })).toBe(
+      "Stack merged",
+    );
   });
 });

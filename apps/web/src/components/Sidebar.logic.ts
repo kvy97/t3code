@@ -7,7 +7,7 @@ import {
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedRunReorder } from "@t3tools/client-runtime/state/thread-sort";
 import {
   getThreadSortTimestamp,
   resolveSettledThreadTimestamp,
@@ -19,6 +19,7 @@ import {
 import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
+import { STACK_MARKER_PREFIX } from "./Sidebar.stack.logic";
 
 const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 200;
@@ -114,11 +115,25 @@ export function sidebarMarkerId(marker: SidebarListMarker): string {
 }
 
 export type SidebarListItem =
-  | { readonly kind: "thread"; readonly key: string; readonly section: SidebarSection }
-  | { readonly kind: "marker"; readonly marker: SidebarListMarker };
+  | {
+      readonly kind: "thread";
+      readonly key: string;
+      readonly section: SidebarSection;
+      /** Set on the rows of a stack run, to the worktree of the stack row
+          above them. A stack row drags its whole run, and this is the only
+          thing that tells its last member apart from an ordinary row that
+          happens to sit right below the run. */
+      readonly stackWorktreePath?: string;
+    }
+  | { readonly kind: "marker"; readonly marker: SidebarListMarker }
+  /** The header row of a stack group. Draggable as a whole; its members are
+      the contiguous run of thread rows directly below it. */
+  | { readonly kind: "stack"; readonly worktreePath: string };
 
 export function sidebarListItemId(item: SidebarListItem): string {
-  return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
+  if (item.kind === "thread") return item.key;
+  if (item.kind === "stack") return `${STACK_MARKER_PREFIX}${item.worktreePath}`;
+  return sidebarMarkerId(item.marker);
 }
 
 /** The section a slot belongs to, read off the markers around it: from
@@ -152,10 +167,31 @@ export function resolveSidebarDropTarget(
 ): SidebarDropTarget | null {
   const activeIndex = items.findIndex((item) => sidebarListItemId(item) === activeKey);
   const overIndex = items.findIndex((item) => sidebarListItemId(item) === overId);
-  if (activeIndex === -1 || overIndex === -1 || items[activeIndex]?.kind !== "thread") return null;
-  const moved = items.filter((_, index) => index !== activeIndex);
-  moved.splice(overIndex, 0, items[activeIndex]!);
-  const section = sectionAtSidebarSlot(moved, overIndex);
+  const active = items[activeIndex];
+  if (activeIndex === -1 || overIndex === -1 || active === undefined) return null;
+  if (active.kind === "marker") return null;
+  // A stack row is the head of a run, not a row of its own: its layers are
+  // the contiguous thread rows right below it. Relocating the marker alone
+  // would leave every member where it was, so the rebuilt order below would
+  // equal the pre-drop order and planSidebarThreadDrop would read the drop
+  // as "dropped back where it started" and write nothing.
+  let runEnd = activeIndex + 1;
+  if (active.kind === "stack") {
+    while (runEnd < items.length) {
+      const next = items[runEnd];
+      if (next?.kind !== "thread" || next.stackWorktreePath !== active.worktreePath) break;
+      runEnd += 1;
+    }
+  }
+  const run = items.slice(activeIndex, runEnd);
+  const moved = items.filter((_, index) => index < activeIndex || index >= runEnd);
+  // arrayMove placement for a block: hovering below the run lands it after
+  // the hovered item once the run's own slots are gone; hovering inside the
+  // run is a no-op. For a single row this is exactly `overIndex`.
+  const insertAt =
+    overIndex < activeIndex ? overIndex : Math.max(activeIndex, overIndex - run.length + 1);
+  moved.splice(insertAt, 0, ...run);
+  const section = sectionAtSidebarSlot(moved, insertAt);
   if (section === "snoozed") return null;
   const pinnedOrder: string[] = [];
   const activeOrder: string[] = [];
@@ -164,7 +200,8 @@ export function resolveSidebarDropTarget(
     if (item.kind === "marker") {
       if (item.marker === "pinned-divider") currentSection = "active";
       else if (item.marker === "snoozed-header" || item.marker === "settled-header") break;
-    } else if (currentSection === "pinned") pinnedOrder.push(item.key);
+    } else if (item.kind === "stack") continue;
+    else if (currentSection === "pinned") pinnedOrder.push(item.key);
     else activeOrder.push(item.key);
   }
   return { section, pinnedOrder, activeOrder };
@@ -216,6 +253,11 @@ export function resolveSidebarDropVerb(
 
 export function planSidebarThreadDrop(input: {
   readonly activeKey: string;
+  /** The contiguous run this drop moves. A stack row moves all its layers;
+      anything else moves the one row and defaults to `[activeKey]`.
+      `activeRunKeys[0]` must be `activeKey`: the pin branch reads the moved
+      row's own key back out of the run's assignments by that id. */
+  readonly activeRunKeys?: readonly string[];
   readonly activeSection: SidebarSection;
   /** Snoozed threads can retain pinning and settlement beneath the shelf. */
   readonly activePinned?: boolean;
@@ -232,6 +274,7 @@ export function planSidebarThreadDrop(input: {
 }): SidebarThreadDropPlan {
   const {
     activeKey,
+    activeRunKeys = [input.activeKey],
     activeSection,
     activePinned = activeSection === "pinned",
     activeSettled = activeSection === "settled",
@@ -256,10 +299,10 @@ export function planSidebarThreadDrop(input: {
       ) {
         return { kind: "none" };
       }
-      const assignments = planPinnedReorder({
+      const assignments = planPinnedRunReorder({
         orderedIds: order,
         keysById: activeKeysById,
-        movedId: activeKey,
+        movedIds: activeRunKeys,
       });
       if (activeReorderableKeys && assignments.some(({ id }) => !activeReorderableKeys.has(id))) {
         return { kind: "none" };
@@ -285,10 +328,10 @@ export function planSidebarThreadDrop(input: {
       ) {
         return { kind: "none" };
       }
-      const assignments = planPinnedReorder({
+      const assignments = planPinnedRunReorder({
         orderedIds: order,
         keysById: pinnedKeysById,
-        movedId: activeKey,
+        movedIds: activeRunKeys,
       });
       if (reorderableKeys && assignments.some(({ id }) => !reorderableKeys.has(id))) {
         return { kind: "none" };

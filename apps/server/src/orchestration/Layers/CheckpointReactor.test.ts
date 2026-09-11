@@ -9,6 +9,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  StackViewFailedError,
 } from "@t3tools/contracts";
 import {
   CommandId,
@@ -38,6 +39,7 @@ import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
+import { StackViewBroadcaster } from "../../stack/StackViewBroadcaster.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { CheckpointReactorLive } from "./CheckpointReactor.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
@@ -339,6 +341,7 @@ describe("CheckpointReactor", () => {
     const refreshAfterTurn = Effect.sync(() => void pullRequestRefreshes.push(1));
     const vcsStatusBroadcasterLayer = Layer.succeed(VcsStatusBroadcaster, {
       getStatus: () => Effect.die("getStatus should not be called in this test"),
+      getLocalStatus: () => Effect.die("getLocalStatus should not be called in this test"),
       refreshLocalStatus: (cwd: string) =>
         Effect.sync(() => {
           options?.gitStatusRefreshCalls?.push(cwd);
@@ -361,6 +364,24 @@ describe("CheckpointReactor", () => {
         }).pipe(Effect.andThen(options?.pullRequestRefresh ?? Effect.void), Effect.as(null)),
       streamStatus: () => Stream.empty,
     });
+    // `refreshLocalGitStatusFromTurnCompletion` calls this after every
+    // successful turn completion (Signal 2), so it must not die here — the
+    // reactor already tolerates a failure via `Effect.catch`.
+    const stackViewBroadcasterLayer = Layer.succeed(StackViewBroadcaster, {
+      getStack: () => Effect.die("getStack should not be called in this test"),
+      refreshStack: (worktreePath: string) =>
+        Effect.fail(
+          new StackViewFailedError({
+            worktreePath,
+            detail: "stack view is not modeled in this test",
+          }),
+        ),
+      refreshStackWithinPermit: () =>
+        Effect.die("refreshStackWithinPermit should not be called in this test"),
+      invalidate: () => Effect.die("invalidate should not be called in this test"),
+      streamStack: () => Stream.die("streamStack should not be called in this test"),
+      withStackPermit: <A, E, R>(_worktreePath: string, effect: Effect.Effect<A, E, R>) => effect,
+    });
 
     const layer = CheckpointReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
@@ -369,6 +390,7 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(Layer.mock(PullRequestService)({ refreshAfterTurn })),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
+      Layer.provideMerge(stackViewBroadcasterLayer),
       Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
       Layer.provideMerge(
         WorkspaceEntries.layer.pipe(

@@ -119,6 +119,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.vcsCreateRef]: AuthOrchestrationOperateScope,
   [WS_METHODS.vcsSwitchRef]: AuthOrchestrationOperateScope,
   [WS_METHODS.vcsInit]: AuthOrchestrationOperateScope,
+  [WS_METHODS.stackView]: AuthOrchestrationReadScope,
+  [WS_METHODS.stackAction]: AuthOrchestrationOperateScope,
   [WS_METHODS.reviewGetDiffPreview]: AuthReviewWriteScope,
   [WS_METHODS.reviewGetDiffFileContents]: AuthReviewWriteScope,
   [WS_METHODS.terminalOpen]: AuthTerminalOperateScope,

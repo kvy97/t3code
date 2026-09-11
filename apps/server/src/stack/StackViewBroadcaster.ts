@@ -1,0 +1,305 @@
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
+
+import type {
+  StackStatus,
+  StackUnavailableReason,
+  StackViewFailedError,
+  StackViewInput,
+} from "@t3tools/contracts";
+
+import * as GhStackCli from "./GhStackCli.ts";
+
+/**
+ * An environment with no `gh` answers "unavailable" instantly and forever;
+ * without a TTL every sidebar scroll would spawn a process to learn that
+ * again. Short enough that installing `gh` shows up without a restart.
+ */
+export const STACK_UNAVAILABLE_TTL = Duration.seconds(30);
+
+/**
+ * Reasons that describe the environment rather than this worktree. Nothing a
+ * turn does can change them, so a turn-completion refresh may trust an
+ * unexpired cached one instead of spawning `gh` again. `not-a-stack` and
+ * `conflicting-local-state` are worktree state and must always re-read —
+ * `gh stack add` inside the turn is exactly what changes them.
+ */
+const ENVIRONMENT_UNAVAILABLE_REASONS = new Set<StackUnavailableReason>([
+  "gh-missing",
+  "extension-missing",
+  "gh-unauthenticated",
+]);
+
+interface CachedStack {
+  readonly fingerprint: string;
+  readonly status: StackStatus;
+  /** Epoch millis, or null for an entry that only signals invalidate it. */
+  readonly expiresAtMillis: number | null;
+}
+
+interface StackChange {
+  readonly worktreePath: string;
+  readonly status: StackStatus;
+}
+
+export class StackViewBroadcaster extends Context.Service<
+  StackViewBroadcaster,
+  {
+    readonly getStack: (worktreePath: string) => Effect.Effect<StackStatus, StackViewFailedError>;
+    readonly refreshStack: (
+      worktreePath: string,
+    ) => Effect.Effect<StackStatus, StackViewFailedError>;
+    /**
+     * The body of `refreshStack` without acquiring the permit. The caller
+     * MUST already hold `withStackPermit` for this exact `worktreePath` —
+     * `Semaphore` is not reentrant, so a caller that does not already hold
+     * the permit (or a caller mid-`withStackPermit` for a *different* cwd)
+     * will suspend forever on a second acquisition, and never release the
+     * permit it is waiting to re-enter. Exists only for `StackActionRunner`,
+     * which holds the permit across a whole action and must publish the
+     * post-action chain under that same permit rather than nesting another.
+     */
+    readonly refreshStackWithinPermit: (
+      worktreePath: string,
+    ) => Effect.Effect<StackStatus, StackViewFailedError>;
+    readonly invalidate: (worktreePath: string) => Effect.Effect<void>;
+    readonly streamStack: (
+      input: StackViewInput,
+    ) => Stream.Stream<StackStatus, StackViewFailedError>;
+    /** One permit per cwd, shared by reads and actions: a `gh stack sync` must
+        not interleave with the read that publishes the new chain. */
+    readonly withStackPermit: <A, E, R>(
+      worktreePath: string,
+      effect: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E, R>;
+  }
+>()("t3/stack/StackViewBroadcaster") {}
+
+function fingerprintStatus(status: StackStatus): string {
+  // `freshness.observedAt` is a fresh timestamp on every read, so fingerprinting
+  // it would make every refresh look like a change and defeat the dedup. Only
+  // the structure decides whether subscribers need a new event.
+  const { freshness: _freshness, ...structure } = status;
+  return JSON.stringify(structure);
+}
+
+/** @public Service construction is part of the canonical Effect module API. */
+export const make = Effect.gen(function* () {
+  const cli = yield* GhStackCli.GhStackCli;
+  const cacheRef = yield* Ref.make(new Map<string, CachedStack>());
+  const changes = yield* Effect.acquireRelease(PubSub.unbounded<StackChange>(), (pubsub) =>
+    PubSub.shutdown(pubsub),
+  );
+
+  // Reads and actions for one worktree share a permit: a chain published from
+  // a read that started before `gh stack sync` must not land after it.
+  const permits = new Map<string, Semaphore.Semaphore>();
+  const withStackPermit = <A, E, R>(worktreePath: string, effect: Effect.Effect<A, E, R>) => {
+    let permit = permits.get(worktreePath);
+    if (permit === undefined) {
+      permit = Semaphore.makeUnsafe(1);
+      permits.set(worktreePath, permit);
+    }
+    return permit.withPermits(1)(effect);
+  };
+
+  const readStack = Effect.fn("StackViewBroadcaster.readStack")(function* (worktreePath: string) {
+    const observedAt = yield* DateTime.now;
+    const outcome = yield* cli.view({ cwd: worktreePath });
+    if (outcome._tag === "unavailable") {
+      const expiresAt = DateTime.addDuration(observedAt, STACK_UNAVAILABLE_TTL);
+      return {
+        status: {
+          _tag: "unavailable",
+          reason: outcome.reason,
+          freshness: { source: "live-local", observedAt, expiresAt: Option.some(expiresAt) },
+        },
+        expiresAtMillis: DateTime.toEpochMillis(expiresAt),
+      } as const;
+    }
+    return {
+      status: {
+        _tag: "available",
+        worktreePath,
+        trunk: outcome.raw.trunk,
+        // `PositiveInt`/`NonNegativeInt` are unbranded `Schema.Int.check(...)`,
+        // so their Type is plain `number` — assign the number, no constructor.
+        stackNumber:
+          outcome.raw.stackNumber !== null && outcome.raw.stackNumber > 0
+            ? outcome.raw.stackNumber
+            : null,
+        layers: outcome.raw.branches.map((branch, index) => ({
+          branch: branch.name,
+          position: index,
+        })),
+        freshness: { source: "live-local", observedAt, expiresAt: Option.none() },
+      },
+      expiresAtMillis: null,
+    } as const;
+  });
+
+  /**
+   * Write the cache silently — used to populate a cold cache from a plain
+   * read, for any reason the cache can be empty. A read is not one of the
+   * invalidation signals (see `streamStack` for what they are), so it must
+   * not echo back onto the PubSub: a `streamStack` subscriber that races its
+   * own cold-cache read against the subscription it just opened would
+   * otherwise see its own read as a phantom "change".
+   */
+  const writeCacheSilently = Effect.fn("StackViewBroadcaster.writeCacheSilently")(function* (
+    worktreePath: string,
+    read: { readonly status: StackStatus; readonly expiresAtMillis: number | null },
+  ) {
+    yield* Ref.update(cacheRef, (cache) => {
+      const next = new Map(cache);
+      next.set(worktreePath, {
+        fingerprint: fingerprintStatus(read.status),
+        status: read.status,
+        expiresAtMillis: read.expiresAtMillis,
+      });
+      return next;
+    });
+    return read.status;
+  });
+
+  /** Write the cache and publish only on a fingerprint change. */
+  const publishIfChanged = Effect.fn("StackViewBroadcaster.publishIfChanged")(function* (
+    worktreePath: string,
+    read: { readonly status: StackStatus; readonly expiresAtMillis: number | null },
+  ) {
+    const fingerprint = fingerprintStatus(read.status);
+    const changed = yield* Ref.modify(cacheRef, (cache) => {
+      const previous = cache.get(worktreePath);
+      const next = new Map(cache);
+      next.set(worktreePath, {
+        fingerprint,
+        status: read.status,
+        expiresAtMillis: read.expiresAtMillis,
+      });
+      return [previous?.fingerprint !== fingerprint, next] as const;
+    });
+    if (changed) {
+      yield* PubSub.publish(changes, { worktreePath, status: read.status });
+    }
+    return read.status;
+  });
+
+  /**
+   * The body of a refresh, WITHOUT taking the permit. `refreshStack` is this
+   * plus the permit; `StackActionRunner` calls this directly because it
+   * already holds the permit for the whole action. Effect's `Semaphore` is
+   * not reentrant, so a nested acquisition on the same cwd suspends forever
+   * and never releases the permit it is waiting on.
+   */
+  const refreshStackWithinPermit: StackViewBroadcaster["Service"]["refreshStackWithinPermit"] = (
+    worktreePath,
+  ) => readStack(worktreePath).pipe(Effect.flatMap((read) => publishIfChanged(worktreePath, read)));
+
+  /**
+   * Runs on every turn completion, in every worktree — including ones that
+   * will never show a stack row — on a serial worker deliberately kept off
+   * the slow path. A machine with no `gh` would pay a failing spawn forever,
+   * and a spawn here can sit behind a `gh stack sync` holding this cwd's
+   * permit for up to two minutes, stalling PR refresh and branch drift for
+   * every other thread. So an unexpired environment-level "unavailable"
+   * short-circuits: nothing a turn did can have changed it.
+   */
+  const refreshStack: StackViewBroadcaster["Service"]["refreshStack"] = (worktreePath) =>
+    Effect.gen(function* () {
+      const cached = yield* unexpiredCached(worktreePath);
+      if (
+        cached !== null &&
+        cached.status._tag === "unavailable" &&
+        ENVIRONMENT_UNAVAILABLE_REASONS.has(cached.status.reason)
+      ) {
+        return cached.status;
+      }
+      return yield* withStackPermit(worktreePath, refreshStackWithinPermit(worktreePath));
+    });
+
+  /** The cached entry for this cwd, or null when there is none or it expired. */
+  const unexpiredCached = Effect.fn("StackViewBroadcaster.unexpiredCached")(function* (
+    worktreePath: string,
+  ) {
+    const cached = yield* Ref.get(cacheRef).pipe(
+      Effect.map((cache) => cache.get(worktreePath) ?? null),
+    );
+    if (cached === null) return null;
+    const nowMillis = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
+    return cached.expiresAtMillis === null || cached.expiresAtMillis > nowMillis ? cached : null;
+  });
+
+  const getStack: StackViewBroadcaster["Service"]["getStack"] = (worktreePath) =>
+    Effect.gen(function* () {
+      const cached = yield* unexpiredCached(worktreePath);
+      if (cached !== null) return cached.status;
+      return yield* withStackPermit(
+        worktreePath,
+        readStack(worktreePath).pipe(
+          Effect.flatMap((read) => writeCacheSilently(worktreePath, read)),
+        ),
+      );
+    });
+
+  const invalidate: StackViewBroadcaster["Service"]["invalidate"] = (worktreePath) =>
+    Ref.update(cacheRef, (cache) => {
+      const next = new Map(cache);
+      next.delete(worktreePath);
+      return next;
+    });
+
+  /**
+   * No poller. The cache is refilled by three signals: a client subscribing
+   * with an empty cache, a turn finishing in the worktree, and a
+   * `stack.action` run through T3. The turn guard's own checkout adds a
+   * fourth invalidation — HEAD moved, so the chain is stale — but it only
+   * clears the entry; the next subscriber's read is what refills it. No VCS
+   * status signal reaches this service.
+   *
+   * The cold-read path is silent for every reason the cache can be empty: a
+   * read is not an invalidation signal, so it writes the cache without
+   * publishing (see `writeCacheSilently`).
+   *
+   * Known hole: `gh stack add` typed straight into a terminal fires none of
+   * them, and it ships unmitigated. A refresh button was rejected because the
+   * cache does not invalidate on resubscribe, so the button would lie rather
+   * than refresh. Terminal-close invalidation was investigated and dropped: a
+   * closing terminal carries only a thread id, with no worktree path to act
+   * on. A `.git/` watcher was rejected too — it would depend on a gh-stack
+   * metadata layout the extension does not promise.
+   */
+  const streamStack: StackViewBroadcaster["Service"]["streamStack"] = (input) =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(changes);
+        // Signal 1: a client subscribing to a stack row with a cold cache.
+        const initial = yield* getStack(input.worktreePath);
+        return Stream.concat(
+          Stream.make(initial),
+          Stream.fromSubscription(subscription).pipe(
+            Stream.filter((change) => change.worktreePath === input.worktreePath),
+            Stream.map((change) => change.status),
+          ),
+        );
+      }),
+    );
+
+  return StackViewBroadcaster.of({
+    getStack,
+    refreshStack,
+    refreshStackWithinPermit,
+    invalidate,
+    streamStack,
+    withStackPermit,
+  });
+});
+
+export const layer = Layer.effect(StackViewBroadcaster, make);

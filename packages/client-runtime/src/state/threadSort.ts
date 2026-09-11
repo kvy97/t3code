@@ -274,6 +274,72 @@ export function planPinnedReorder(input: {
 }
 
 /**
+ * A stack row moves its whole run of layers in one drop, so it needs N
+ * consecutive keys between the neighbors — not one. Same fallback as the
+ * single-thread path: a keyless neighbor means rewriting the section.
+ *
+ * `orderedIds` only lists rendered rows: a collapsed stack's hidden layers
+ * never appear in it, so `movedIds` (every layer, hidden or not) is often a
+ * strict superset. Contiguity is therefore checked only among the moved ids
+ * that DO appear — no foreign (non-moved) row sitting between them — and
+ * every moved id, present or not, still gets a fresh key from the same
+ * anchor pair. A hidden run collapsed to nothing (no member present) has no
+ * anchor to work from and is left alone, same as before.
+ */
+export function planPinnedRunReorder(input: {
+  readonly orderedIds: readonly string[];
+  readonly keysById: ReadonlyMap<string, string | null | undefined>;
+  readonly movedIds: readonly string[];
+}): ReadonlyArray<{ readonly id: string; readonly orderKey: string }> {
+  const { orderedIds, keysById, movedIds } = input;
+  if (movedIds.length === 0) return [];
+  if (movedIds.length === 1) {
+    return planPinnedReorder({ orderedIds, keysById, movedId: movedIds[0]! });
+  }
+  const movedSet = new Set(movedIds);
+  const presentIndices = orderedIds.flatMap((id, index) => (movedSet.has(id) ? [index] : []));
+  if (presentIndices.length === 0) return [];
+  const start = presentIndices[0]!;
+  const end = presentIndices[presentIndices.length - 1]!;
+  const contiguous = presentIndices.every((index, offset) => index === start + offset);
+  if (!contiguous) return [];
+
+  const visibleIds = new Set(orderedIds);
+  const reservedKeys = new Set(
+    [...keysById].flatMap(([id, key]) => (!visibleIds.has(id) && key != null ? [key] : [])),
+  );
+  const beforeId = start > 0 ? orderedIds[start - 1] : null;
+  const afterId = end < orderedIds.length - 1 ? orderedIds[end + 1] : null;
+  const beforeKey = beforeId != null ? (keysById.get(beforeId) ?? null) : null;
+  const afterKey = afterId != null ? (keysById.get(afterId) ?? null) : null;
+
+  if ((beforeId === null || beforeKey != null) && (afterId === null || afterKey != null)) {
+    const assignments: Array<{ id: string; orderKey: string }> = [];
+    let cursor = beforeKey;
+    let usable = true;
+    for (const id of movedIds) {
+      let key = pinOrderKeyBetween(cursor, afterKey);
+      while (key !== null && reservedKeys.has(key)) key = pinOrderKeyBetween(key, afterKey);
+      if (key === null) {
+        usable = false;
+        break;
+      }
+      assignments.push({ id, orderKey: key });
+      cursor = key;
+    }
+    if (usable) return assignments;
+  }
+
+  const keys = generateSpreadPinOrderKeys(orderedIds.length + reservedKeys.size)
+    .filter((key) => !reservedKeys.has(key))
+    .slice(0, orderedIds.length);
+  return orderedIds.flatMap((id, index) => {
+    const key = keys[index]!;
+    return keysById.get(id) === key ? [] : [{ id, orderKey: key }];
+  });
+}
+
+/**
  * Pinned block order: user-arranged keys first (string comparison, id
  * tiebreak), then keyless threads newest-created first — so threads on
  * servers that predate reordering keep the static creation order at the
