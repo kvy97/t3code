@@ -82,6 +82,50 @@ offline environments and older servers keep their previous values. If connected
 environments disagree, **Apply to all** copies your current settings to those named
 in the warning. Changing a rule does not reopen already settled threads.
 
+## Work in a stack of pull requests
+
+When two or more threads share a worktree, the sidebar groups them under one
+stack row instead of listing them separately. If their branches form a stack
+through the `gh stack` extension, the row lists each layer in stack order,
+bottom branch first, and carries the actions below. If not — or if `gh` isn't
+set up — the row still groups the threads, but marks itself unavailable and
+hides those actions.
+
+Collapse the row to keep just one layer showing: whichever thread you have
+open, or the bottom layer otherwise. Expand it to see every layer again. This
+is remembered per device and isn't shared with your other clients.
+
+On web and desktop, the stack row's menu carries the actions that apply to
+the whole stack — **Submit stack**, **Sync stack**, **Rebase upstack**, and
+**Merge stack** — plus a checkout entry for each layer. The same four actions
+are in the command palette. **New thread in this stack**, in the branch
+toolbar, adds a layer and opens a thread on it in one step, reusing the
+current worktree.
+
+Pinning or settling from the stack row applies to every layer at once. Acting
+on a single layer's own thread moves only that thread; the group otherwise
+follows its most active member, so a stack whose bottom pull request already
+merged stays in your active list until every layer is settled.
+
+Merging a stack whose base branch uses a merge queue queues it rather than
+landing it right away, and the row says so until the queue processes it.
+
+Conflicts are not resolved here. When a stack action stops on one, T3 Code
+opens that worktree's terminal so you can finish in git.
+
+A turn will not start while another thread in the same worktree is already
+running, and it will not start when the worktree has uncommitted changes on a
+different branch — your work is never stashed or switched for you. Interrupt
+the other thread, or commit or discard the changes, and try again.
+
+If you restore a checkpoint from before a stack rebase, the confirmation
+explains that its diff mixes in work the rebase brought in from the layers
+below.
+
+Stack actions run on the machine hosting your T3 Code server, so `gh` and the
+`gh stack` extension need to be installed and signed in there — not on the
+device you're using.
+
 ## Link a pull request
 
 The server finds the PR for each unsettled thread's saved branch, even when your
