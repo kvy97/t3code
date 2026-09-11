@@ -174,7 +174,13 @@ export function insertStackGroupsIntoSidebarItems(input: {
     emitted.add(group.worktreePath);
     next.push({ kind: "stack", worktreePath: group.worktreePath });
     for (const key of group.visibleMemberKeys) {
-      next.push({ kind: "thread", key, section: sectionByKey.get(key) ?? item.section });
+      next.push({
+        kind: "thread",
+        key,
+        section: sectionByKey.get(key) ?? item.section,
+        // Marks the run for the drop resolver: the stack row drags all of it.
+        stackWorktreePath: group.worktreePath,
+      });
     }
   }
   return next;

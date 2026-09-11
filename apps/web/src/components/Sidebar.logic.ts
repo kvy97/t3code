@@ -115,7 +115,16 @@ export function sidebarMarkerId(marker: SidebarListMarker): string {
 }
 
 export type SidebarListItem =
-  | { readonly kind: "thread"; readonly key: string; readonly section: SidebarSection }
+  | {
+      readonly kind: "thread";
+      readonly key: string;
+      readonly section: SidebarSection;
+      /** Set on the rows of a stack run, to the worktree of the stack row
+          above them. A stack row drags its whole run, and this is the only
+          thing that tells its last member apart from an ordinary row that
+          happens to sit right below the run. */
+      readonly stackWorktreePath?: string;
+    }
   | { readonly kind: "marker"; readonly marker: SidebarListMarker }
   /** The header row of a stack group. Draggable as a whole; its members are
       the contiguous run of thread rows directly below it. */
@@ -161,9 +170,28 @@ export function resolveSidebarDropTarget(
   const active = items[activeIndex];
   if (activeIndex === -1 || overIndex === -1 || active === undefined) return null;
   if (active.kind === "marker") return null;
-  const moved = items.filter((_, index) => index !== activeIndex);
-  moved.splice(overIndex, 0, active);
-  const section = sectionAtSidebarSlot(moved, overIndex);
+  // A stack row is the head of a run, not a row of its own: its layers are
+  // the contiguous thread rows right below it. Relocating the marker alone
+  // would leave every member where it was, so the rebuilt order below would
+  // equal the pre-drop order and planSidebarThreadDrop would read the drop
+  // as "dropped back where it started" and write nothing.
+  let runEnd = activeIndex + 1;
+  if (active.kind === "stack") {
+    while (runEnd < items.length) {
+      const next = items[runEnd];
+      if (next?.kind !== "thread" || next.stackWorktreePath !== active.worktreePath) break;
+      runEnd += 1;
+    }
+  }
+  const run = items.slice(activeIndex, runEnd);
+  const moved = items.filter((_, index) => index < activeIndex || index >= runEnd);
+  // arrayMove placement for a block: hovering below the run lands it after
+  // the hovered item once the run's own slots are gone; hovering inside the
+  // run is a no-op. For a single row this is exactly `overIndex`.
+  const insertAt =
+    overIndex < activeIndex ? overIndex : Math.max(activeIndex, overIndex - run.length + 1);
+  moved.splice(insertAt, 0, ...run);
+  const section = sectionAtSidebarSlot(moved, insertAt);
   if (section === "snoozed") return null;
   const pinnedOrder: string[] = [];
   const activeOrder: string[] = [];
