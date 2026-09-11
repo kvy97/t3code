@@ -172,7 +172,10 @@ export const make = Effect.gen(function* () {
 
         if (outcome._tag === "conflicted") {
           // Refresh first: the chain may already have moved before the conflict.
-          yield* broadcaster.refreshStack(input.worktreePath).pipe(Effect.ignore);
+          // `withinPermit`: this whole `run` is already inside `withStackPermit`
+          // for this cwd — `refreshStack` would try to reacquire the same
+          // (non-reentrant) permit and hang forever, still holding it.
+          yield* broadcaster.refreshStackWithinPermit(input.worktreePath).pipe(Effect.ignore);
           return yield* new StackActionConflictedError({
             worktreePath: input.worktreePath,
             branch: input.branch ?? null,
@@ -191,7 +194,9 @@ export const make = Effect.gen(function* () {
         }
 
         // Signal 3: a stack.action run through T3 invalidates the cached chain.
-        const status = yield* broadcaster.refreshStack(input.worktreePath);
+        // `withinPermit`: see the comment on the conflict branch above — `run`
+        // already holds this cwd's permit for the whole action.
+        const status = yield* broadcaster.refreshStackWithinPermit(input.worktreePath);
 
         if (stackActionRewritesBranches(input.action) && status._tag === "available") {
           const activity = rebaseBoundaryActivity({

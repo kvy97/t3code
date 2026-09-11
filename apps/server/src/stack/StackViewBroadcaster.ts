@@ -39,6 +39,19 @@ export class StackViewBroadcaster extends Context.Service<
     readonly refreshStack: (
       worktreePath: string,
     ) => Effect.Effect<StackStatus, StackViewFailedError>;
+    /**
+     * The body of `refreshStack` without acquiring the permit. The caller
+     * MUST already hold `withStackPermit` for this exact `worktreePath` —
+     * `Semaphore` is not reentrant, so a caller that does not already hold
+     * the permit (or a caller mid-`withStackPermit` for a *different* cwd)
+     * will suspend forever on a second acquisition, and never release the
+     * permit it is waiting to re-enter. Exists only for `StackActionRunner`,
+     * which holds the permit across a whole action and must publish the
+     * post-action chain under that same permit rather than nesting another.
+     */
+    readonly refreshStackWithinPermit: (
+      worktreePath: string,
+    ) => Effect.Effect<StackStatus, StackViewFailedError>;
     readonly invalidate: (worktreePath: string) => Effect.Effect<void>;
     readonly streamStack: (
       input: StackViewInput,
@@ -160,11 +173,19 @@ export const make = Effect.gen(function* () {
     return read.status;
   });
 
+  /**
+   * The body of a refresh, WITHOUT taking the permit. `refreshStack` is this
+   * plus the permit; `StackActionRunner` calls this directly because it
+   * already holds the permit for the whole action. Effect's `Semaphore` is
+   * not reentrant, so a nested acquisition on the same cwd suspends forever
+   * and never releases the permit it is waiting on.
+   */
+  const refreshStackWithinPermit: StackViewBroadcaster["Service"]["refreshStackWithinPermit"] = (
+    worktreePath,
+  ) => readStack(worktreePath).pipe(Effect.flatMap((read) => publishIfChanged(worktreePath, read)));
+
   const refreshStack: StackViewBroadcaster["Service"]["refreshStack"] = (worktreePath) =>
-    withStackPermit(
-      worktreePath,
-      readStack(worktreePath).pipe(Effect.flatMap((read) => publishIfChanged(worktreePath, read))),
-    );
+    withStackPermit(worktreePath, refreshStackWithinPermit(worktreePath));
 
   const getStack: StackViewBroadcaster["Service"]["getStack"] = (worktreePath) =>
     Effect.gen(function* () {
@@ -221,6 +242,7 @@ export const make = Effect.gen(function* () {
   return StackViewBroadcaster.of({
     getStack,
     refreshStack,
+    refreshStackWithinPermit,
     invalidate,
     streamStack,
     withStackPermit,

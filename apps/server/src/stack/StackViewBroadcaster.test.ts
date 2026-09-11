@@ -116,6 +116,54 @@ describe("StackViewBroadcaster", () => {
     }),
   );
 
+  it.effect(
+    "refreshStackWithinPermit completes and publishes when the caller already holds the permit",
+    () =>
+      Effect.gen(function* () {
+        const branchesRef = { current: ["feat/base"] };
+        const layer = makeLayer(() => Effect.succeed(viewOf(branchesRef.current)));
+
+        yield* Effect.gen(function* () {
+          const broadcaster = yield* StackViewBroadcaster.StackViewBroadcaster;
+          const collected = yield* Stream.runCollect(
+            broadcaster.streamStack({ worktreePath: "/repo/wt" }).pipe(Stream.take(2)),
+          ).pipe(Effect.forkChild({ startImmediately: true }));
+
+          // Let the initial cold-cache read (signal 1) settle before changing
+          // the chain and refreshing.
+          yield* TestClock.adjust("1 second");
+          branchesRef.current = ["feat/base", "feat/top"];
+
+          // The exact shape StackActionRunner uses: the caller already holds
+          // the permit via withStackPermit, and calls refreshStackWithinPermit
+          // — not refreshStack — from inside it. If refreshStackWithinPermit
+          // ever regains its own internal permit acquisition, this call
+          // suspends forever (Semaphore is not reentrant) and the test hangs
+          // until the suite's testTimeout, rather than failing an assertion
+          // directly — see the report for why a direct assertion isn't cheap
+          // to add here.
+          const status = yield* broadcaster.withStackPermit(
+            "/repo/wt",
+            broadcaster.refreshStackWithinPermit("/repo/wt"),
+          );
+
+          assert.equal(status._tag, "available");
+          if (status._tag === "available") {
+            assert.deepStrictEqual(status.layers, [
+              { branch: "feat/base", position: 0 },
+              { branch: "feat/top", position: 1 },
+            ]);
+          }
+
+          const events = yield* Fiber.join(collected);
+          const layerCounts = [...events].map((event) =>
+            event._tag === "available" ? event.layers.length : -1,
+          );
+          assert.deepStrictEqual(layerCounts, [1, 2]);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
   it.effect("serializes work per worktree under one permit", () =>
     Effect.gen(function* () {
       const order: string[] = [];
