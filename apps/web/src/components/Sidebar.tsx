@@ -3250,7 +3250,15 @@ export default function Sidebar() {
       ),
     [activeThreads],
   );
-  const draggableRowKeys = useMemo(() => {
+  // PICKUP only, not the order-key write gate: whether a row's drag handle is
+  // enabled. A stack member can't be picked up on its own (the marker moves
+  // the whole run), but its orderKey still gets written on a drop — that
+  // question is `draggableThreadKeys` (the server-capability set), passed as
+  // `reorderableKeys` at both planSidebarThreadDrop call sites below. Do not
+  // reuse this set there: every run member would then fail the "is this id
+  // reorderable" guard by construction, and every stack-row drop into the
+  // pinned block would silently no-op.
+  const pickupableRowKeys = useMemo(() => {
     if (stackGroups.length === 0) return draggableThreadKeys;
     // Layer order comes from git; dragging one layer would mean restructuring
     // the stack. The stack row is the movable unit.
@@ -3559,7 +3567,10 @@ export default function Sidebar() {
             target,
             pinnedOrder: pinnedKeys,
             pinnedKeysById,
-            reorderableKeys: draggableRowKeys,
+            // The server-capability set, not pickupableRowKeys: every run
+            // member's orderKey still gets written on this drop even though
+            // only the marker itself can be picked up.
+            reorderableKeys: draggableThreadKeys,
             activeOrder: activeKeys,
             activeKeysById,
             activeReorderableKeys: activeReorderableThreadKeys,
@@ -3580,7 +3591,7 @@ export default function Sidebar() {
     draggedThreadKey,
     draggedFromSection,
     dragActivationY,
-    draggableRowKeys,
+    draggableThreadKeys,
     pinnedKeys,
     sidebarListItems,
     stackGroups,
@@ -3613,7 +3624,10 @@ export default function Sidebar() {
         target,
         pinnedOrder: pinnedKeys,
         pinnedKeysById,
-        reorderableKeys: draggableRowKeys,
+        // The server-capability set, not pickupableRowKeys: every run
+        // member's orderKey still gets written on this drop even though
+        // only the marker itself can be picked up.
+        reorderableKeys: draggableThreadKeys,
         activeOrder: activeKeys,
         activeKeysById,
         activeReorderableKeys: activeReorderableThreadKeys,
@@ -3727,7 +3741,7 @@ export default function Sidebar() {
       serverConfigs,
       activeKeys,
       activeReorderableThreadKeys,
-      draggableRowKeys,
+      draggableThreadKeys,
       pinThread,
       pinnedKeys,
       planForwardNavigation,
@@ -4920,7 +4934,7 @@ export default function Sidebar() {
                           <SortableThreadRow
                             key={threadKey}
                             id={threadKey}
-                            disabled={!draggableRowKeys.has(threadKey) || optimisticDrop !== null}
+                            disabled={!pickupableRowKeys.has(threadKey) || optimisticDrop !== null}
                           >
                             {(bag) => renderThreadRowInner(thread, section, bag)}
                           </SortableThreadRow>

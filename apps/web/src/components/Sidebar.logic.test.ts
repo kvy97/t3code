@@ -1554,6 +1554,39 @@ describe("planSidebarThreadDrop", () => {
       "e1:t-top",
     ]);
   });
+
+  it("pins every stack member when reorderableKeys is the server-capability set, not the pickup set", () => {
+    // reorderableKeys here stands in for the real caller's draggableThreadKeys
+    // (the server-capability set): it must contain every run member, because
+    // pinning the run writes an orderKey to each one. A caller that instead
+    // passed the row-pickup set (which excludes every stack member by
+    // construction, since only the marker can be picked up) would trip this
+    // branch's guard on every id in the run and silently discard the drop —
+    // see planSidebarThreadDrop's "pinned" case.
+    const result = planSidebarThreadDrop({
+      activeKey: "e1:t-base",
+      activeRunKeys: ["e1:t-base", "e1:t-top"],
+      activeSection: "active",
+      target: {
+        section: "pinned",
+        pinnedOrder: ["e1:t-base", "e1:t-top"],
+        activeOrder: [],
+      },
+      pinnedOrder: [],
+      pinnedKeysById: new Map(),
+      reorderableKeys: new Set(["e1:t-other", "e1:t-base", "e1:t-top"]),
+      activeOrder: ["e1:t-other", "e1:t-base", "e1:t-top"],
+      activeKeysById: new Map(),
+    });
+
+    expect(result.kind).toBe("pin");
+    if (result.kind !== "pin") return;
+    const assignedIds = [
+      ...(result.orderKey === undefined ? [] : ["e1:t-base"]),
+      ...result.extraAssignments.map((assignment) => assignment.id),
+    ];
+    expect(assignedIds).toEqual(["e1:t-base", "e1:t-top"]);
+  });
 });
 
 describe("applySidebarThreadDrop", () => {
