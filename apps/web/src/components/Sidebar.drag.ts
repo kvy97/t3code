@@ -135,6 +135,9 @@ export function createSidebarSortingStrategy(input: {
         }
         continue;
       }
+      // A stack row has no section/key of its own; it never buckets into a
+      // section group here (Task 10 gives it its own drag handling).
+      if (item.kind === "stack") continue;
       if (item.section === "pinned" || item.section === "active")
         cardHeight ??= rects[index]?.height;
       else slimHeight ??= rects[index]?.height;

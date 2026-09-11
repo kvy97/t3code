@@ -4751,6 +4751,8 @@ export default function Sidebar() {
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
                           continue;
                         }
+                        // Task 11 replaces this with a real stack row.
+                        if (item.kind === "stack") continue;
                         switch (item.marker) {
                           case "pinned-header":
                             items.push(
