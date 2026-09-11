@@ -8,8 +8,11 @@ import { resolveAdjacentThreadId, type SidebarListItem } from "./Sidebar.logic";
 import {
   buildStackGroups,
   collectHiddenStackMemberKeys,
+  describeStackUnavailable,
+  formatStackLayerCountLabel,
   insertStackGroupsIntoSidebarItems,
   resolveStackDragRunKeys,
+  resolveStackRowLabel,
   stackMarkerId,
   type StackGroupSource,
 } from "./Sidebar.stack.logic";
@@ -283,5 +286,55 @@ describe("resolveStackDragRunKeys", () => {
     const groups = buildStackGroups([source({})]);
 
     expect(resolveStackDragRunKeys({ groups, activeId: "e1:t-top" })).toEqual(["e1:t-top"]);
+  });
+});
+
+describe("resolveStackRowLabel", () => {
+  it("uses the worktree's last path segment", () => {
+    expect(
+      resolveStackRowLabel({ worktreePath: "/repo/feat-stack-view", bottomBranch: "main" }),
+    ).toBe("feat-stack-view");
+  });
+
+  it("falls back to the bottom branch for a dot-prefixed segment", () => {
+    expect(
+      resolveStackRowLabel({ worktreePath: "/home/user/project/.t3", bottomBranch: "feat/base" }),
+    ).toBe("feat/base");
+  });
+
+  it("falls back to the worktree path when there is no bottom branch either", () => {
+    expect(
+      resolveStackRowLabel({ worktreePath: "/home/user/project/.t3", bottomBranch: null }),
+    ).toBe("/home/user/project/.t3");
+  });
+});
+
+describe("describeStackUnavailable", () => {
+  it("returns the gh stack unstack --local remediation verbatim", () => {
+    expect(describeStackUnavailable("conflicting-local-state")).toEqual({
+      summary: "The local stack state is inconsistent.",
+      remediation: "gh stack unstack --local",
+    });
+  });
+});
+
+describe("formatStackLayerCountLabel", () => {
+  it("shows the full layer count when nothing is hidden", () => {
+    const [group] = buildStackGroups([source({})]);
+    expect(formatStackLayerCountLabel(group!)).toBe("2 layers");
+  });
+
+  it("shows how many layers are visible when the group is collapsed", () => {
+    const [group] = buildStackGroups([source({ collapsed: true })]);
+    expect(formatStackLayerCountLabel(group!)).toBe("1 of 2 layers");
+  });
+
+  it("counts threads, not layers, when the chain is unavailable", () => {
+    const [group] = buildStackGroups([
+      source({
+        status: { _tag: "unavailable", reason: "gh-missing", freshness } satisfies StackStatus,
+      }),
+    ]);
+    expect(formatStackLayerCountLabel(group!)).toBe("2 threads");
   });
 });

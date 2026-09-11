@@ -190,3 +190,54 @@ export function resolveStackDragRunKeys(input: {
   }
   return [input.activeId];
 }
+
+/** The last path segment names the worktree the way the user thinks of it;
+    a bare `.t3`-style or numeric segment says nothing, so fall back to the
+    bottom branch. */
+export function resolveStackRowLabel(input: {
+  readonly worktreePath: string;
+  readonly bottomBranch: string | null;
+}): string {
+  const segment = input.worktreePath.split("/").filter(Boolean).at(-1) ?? "";
+  const uninformative = segment.length === 0 || segment.startsWith(".") || /^\d+$/.test(segment);
+  return uninformative ? (input.bottomBranch ?? input.worktreePath) : segment;
+}
+
+export function describeStackUnavailable(reason: StackUnavailableReason): {
+  readonly summary: string;
+  readonly remediation: string | null;
+} {
+  switch (reason) {
+    case "gh-missing":
+      return { summary: "Stack actions need the GitHub CLI on the server.", remediation: null };
+    case "extension-missing":
+      return {
+        summary: "Stack actions need the gh stack extension on the server.",
+        remediation: "gh extension install github/gh-stack",
+      };
+    case "gh-unauthenticated":
+      return { summary: "The server's GitHub CLI is not signed in.", remediation: "gh auth login" };
+    case "not-a-stack":
+      return { summary: "These branches are not a stack.", remediation: null };
+    case "conflicting-local-state":
+      return {
+        summary: "The local stack state is inconsistent.",
+        remediation: "gh stack unstack --local",
+      };
+  }
+}
+
+/**
+ * A collapsed group — or one whose bottom layer is snoozed onto its own
+ * shelf — renders a header above exactly one visible row. That header's
+ * count is the only signal that a hidden layer exists at all, so it must
+ * read as "1 of 2 layers", not just "2 layers" sitting oddly over one row.
+ */
+export function formatStackLayerCountLabel(group: StackGroup): string {
+  const total = group.unavailableReason === null ? group.layerCount : group.memberKeys.length;
+  const noun = group.unavailableReason === null ? "layer" : "thread";
+  const label = `${total} ${noun}${total === 1 ? "" : "s"}`;
+  return group.hiddenMemberKeys.length === 0
+    ? label
+    : `${group.visibleMemberKeys.length} of ${label}`;
+}

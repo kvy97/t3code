@@ -27,9 +27,11 @@ import {
 } from "@t3tools/client-runtime/environment";
 import {
   resolveEnvironmentMachineKind,
+  type EnvironmentId,
   type EnvironmentMachineKind,
   type ProjectIconOverride,
   type ScopedThreadRef,
+  type StackStatus,
   type ThreadId,
 } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
@@ -121,6 +123,7 @@ import {
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
+import { stackEnvironment } from "../state/stack";
 import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -171,6 +174,17 @@ import {
   type SidebarListMarker,
   type SidebarSection,
 } from "./Sidebar.logic";
+import {
+  buildStackGroups,
+  collectHiddenStackMemberKeys,
+  insertStackGroupsIntoSidebarItems,
+  resolveStackDragRunKeys,
+  stackMarkerId,
+  type StackGroup,
+  type StackGroupMember,
+  type StackGroupSource,
+} from "./Sidebar.stack.logic";
+import SidebarStackRow from "./SidebarStackRow";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   createSidebarCollisionDetection,
@@ -235,6 +249,9 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Fresh keys deliberately reset both shelves to collapsed for existing users.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
+// Which worktrees' stack rows this device has collapsed. Per worktree and
+// per device: where this user left the sidebar, not a fact about the stack.
+const COLLAPSED_STACKS_KEY = "t3code:sidebar:collapsed-stacks";
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -488,7 +505,7 @@ function SnoozePopoverButton(props: {
 // constraint keeps plain clicks working, and we skip dnd-kit's aria
 // attributes since there is no keyboard sensor and the row body already
 // carries its own button semantics.
-type SortableThreadRowBag = Pick<
+export type SortableThreadRowBag = Pick<
   ReturnType<typeof useSortable>,
   "listeners" | "setNodeRef" | "transform" | "transition" | "isDragging"
 >;
@@ -2069,6 +2086,31 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   );
 });
 
+/**
+ * One subscription per worktree that has two or more threads. The parent needs
+ * the chain before it builds its row list — layer order and collapse masking
+ * both depend on it — and hooks cannot be called in a loop, so each candidate
+ * gets a probe that renders nothing. Cheap: `stack.view` has no poller and
+ * emits one small object per change.
+ */
+const StackStatusProbe = memo(function StackStatusProbe(props: {
+  environmentId: EnvironmentId;
+  worktreePath: string;
+  onStatus: (worktreePath: string, status: StackStatus | null) => void;
+}) {
+  const query = useEnvironmentQuery(
+    stackEnvironment.status({
+      environmentId: props.environmentId,
+      input: { worktreePath: props.worktreePath },
+    }),
+  );
+  const status = query.data ?? null;
+  useEffect(() => {
+    props.onStatus(props.worktreePath, status);
+  }, [props, status]);
+  return null;
+});
+
 export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
@@ -2684,6 +2726,22 @@ export default function Sidebar() {
     () => setSnoozedShelfExpanded((value) => !value),
     [setSnoozedShelfExpanded],
   );
+  // Collapse is per worktree and per device: it is where this user left the
+  // sidebar, not a fact about the stack. No server round trip.
+  const [collapsedStackWorktrees, setCollapsedStackWorktrees] = useLocalStorage(
+    COLLAPSED_STACKS_KEY,
+    [] as readonly string[],
+    Schema.Array(Schema.String),
+  );
+  const toggleStackCollapsed = useCallback(
+    (worktreePath: string) =>
+      setCollapsedStackWorktrees((current) =>
+        current.includes(worktreePath)
+          ? current.filter((path) => path !== worktreePath)
+          : [...current, worktreePath],
+      ),
+    [setCollapsedStackWorktrees],
+  );
   const visibleSnoozedThreads = useMemo(() => {
     if (snoozedShelfExpanded) return snoozedThreads;
     // The open thread must never vanish behind the collapsed shelf: a
@@ -2698,9 +2756,110 @@ export default function Sidebar() {
     return routeThread === undefined ? [] : [routeThread];
   }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
 
+  // Threads keyed by the worktree they share, before the chain is known: this
+  // is also the list of worktrees worth subscribing to. A snoozed thread
+  // still counts toward the worktree's total (it is a second real thread on
+  // that worktree), even though buildStackGroups renders it on its own shelf
+  // instead of in the group.
+  const threadsByWorktree = useMemo(() => {
+    const byWorktree = new Map<
+      string,
+      { environmentId: EnvironmentId; members: StackGroupMember[] }
+    >();
+    const addSection = (list: readonly EnvironmentThreadShell[], section: SidebarSection) => {
+      for (const thread of list) {
+        if (thread.worktreePath === null) continue;
+        const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+        const entry = byWorktree.get(thread.worktreePath) ?? {
+          environmentId: thread.environmentId,
+          members: [],
+        };
+        entry.members.push({ key, branch: thread.branch, section });
+        byWorktree.set(thread.worktreePath, entry);
+      }
+    };
+    addSection(pinnedThreads, "pinned");
+    addSection(activeThreads, "active");
+    addSection(snoozedThreads, "snoozed");
+    addSection(settledThreads, "settled");
+    // One thread is not a stack; do not subscribe for it.
+    return new Map([...byWorktree].filter(([, entry]) => entry.members.length >= 2));
+  }, [activeThreads, pinnedThreads, settledThreads, snoozedThreads]);
+
+  // Every thread across every shelf, keyed by scoped key, regardless of
+  // whether its row currently renders. Stack-group derivations (the busy
+  // marker, the bottom layer's branch for the row label) must see hidden and
+  // paginated-out members too — unlike `threadByKey` below, which stays
+  // restricted to rendered rows so masked layers never hold a live
+  // subscription.
+  const allThreadsByKey = useMemo(() => {
+    const map = new Map<string, EnvironmentThreadShell>();
+    for (const thread of [
+      ...pinnedThreads,
+      ...activeThreads,
+      ...snoozedThreads,
+      ...settledThreads,
+    ]) {
+      map.set(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread);
+    }
+    return map;
+  }, [activeThreads, pinnedThreads, settledThreads, snoozedThreads]);
+
+  const [stackStatusByWorktree, setStackStatusByWorktree] = useState<
+    ReadonlyMap<string, StackStatus | null>
+  >(() => new Map());
+  const handleStackStatus = useCallback((worktreePath: string, status: StackStatus | null) => {
+    setStackStatusByWorktree((current) => {
+      // Identity guard: the probe re-reports on every stream event, and an
+      // unconditional setState here would repaint the whole sidebar.
+      if (current.get(worktreePath) === status) return current;
+      const next = new Map(current);
+      next.set(worktreePath, status);
+      return next;
+    });
+  }, []);
+
+  const stackGroupSources = useMemo(
+    (): readonly StackGroupSource[] =>
+      [...threadsByWorktree].map(([worktreePath, entry]) => ({
+        worktreePath,
+        status: stackStatusByWorktree.get(worktreePath) ?? null,
+        members: entry.members,
+        collapsed: collapsedStackWorktrees.includes(worktreePath),
+        // Single source for HEAD: the stack contract deliberately omits it.
+        // `resolveVisibleKeys` falls back to the route member, then the
+        // bottom layer, when this is null — `SidebarStackRow` subscribes to
+        // `vcsEnvironment.status` for its own worktree and can show the
+        // checked-out branch itself.
+        checkedOutBranch: null,
+        routeKey: routeThreadKey,
+      })),
+    [collapsedStackWorktrees, routeThreadKey, stackStatusByWorktree, threadsByWorktree],
+  );
+  const stackGroups = useMemo(() => buildStackGroups(stackGroupSources), [stackGroupSources]);
+  const hiddenStackMemberKeys = useMemo(
+    () => collectHiddenStackMemberKeys(stackGroups),
+    [stackGroups],
+  );
+
   const orderedThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
-    [pinnedThreads, activeThreads, visibleSnoozedThreads, renderedSettledThreads],
+    () =>
+      [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads]
+        // A collapsed group is one keyboard step, and its masked layers must
+        // not hold live thread-detail subscriptions.
+        .filter(
+          (thread) =>
+            !hiddenStackMemberKeys.has(
+              scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+            ),
+        ),
+    [
+      activeThreads,
+      hiddenStackMemberKeys,
+      pinnedThreads,
+      renderedSettledThreads,
+      visibleSnoozedThreads,
+    ],
   );
   const orderedThreadKeys = useMemo(
     () =>
@@ -3091,6 +3250,13 @@ export default function Sidebar() {
       ),
     [activeThreads],
   );
+  const draggableRowKeys = useMemo(() => {
+    if (stackGroups.length === 0) return draggableThreadKeys;
+    // Layer order comes from git; dragging one layer would mean restructuring
+    // the stack. The stack row is the movable unit.
+    const members = new Set(stackGroups.flatMap((group) => [...group.memberKeys]));
+    return new Set([...draggableThreadKeys].filter((key) => !members.has(key)));
+  }, [draggableThreadKeys, stackGroups]);
   useEffect(() => {
     if (optimisticDrop === null) return;
     const canonicalByKey = new Map(
@@ -3264,13 +3430,14 @@ export default function Sidebar() {
     const settledRows = rowsOf(renderedSettledThreads, "settled");
     items.push({ kind: "marker", marker: "settled-placeholder" });
     items.push(...settledRows);
-    return items;
+    return insertStackGroupsIntoSidebarItems({ items, groups: stackGroups });
   }, [
     activeThreads,
     pinnedThreads,
     renderedSettledThreads,
     settledThreads.length,
     snoozedThreads.length,
+    stackGroups,
     visibleSnoozedThreads,
   ]);
   useEffect(() => {
@@ -3360,7 +3527,11 @@ export default function Sidebar() {
   const dndCollisionDetection = useMemo(() => {
     if (draggedThreadKey === undefined || draggedFromSection === undefined)
       return createSidebarCollisionDetection(() => true);
-    const source = threadByKey.get(draggedThreadKey);
+    const run = resolveStackDragRunKeys({ groups: stackGroups, activeId: draggedThreadKey });
+    // planSidebarThreadDrop keys its pin/settle decisions off activeKey, so
+    // it must be the run's first member, not the marker id.
+    const activeKey = run[0] ?? draggedThreadKey;
+    const source = threadByKey.get(activeKey);
     if (source === undefined) return createSidebarCollisionDetection(() => false);
     return createSidebarCollisionDetection(
       (id) => {
@@ -3368,7 +3539,8 @@ export default function Sidebar() {
         if (target === null) return false;
         return (
           planSidebarThreadDrop({
-            activeKey: draggedThreadKey,
+            activeKey,
+            activeRunKeys: run,
             activeSection: draggedFromSection,
             activePinned: source.pinnedAt != null,
             activeSettled: source.settledOverride === "settled",
@@ -3378,7 +3550,7 @@ export default function Sidebar() {
             target,
             pinnedOrder: pinnedKeys,
             pinnedKeysById,
-            reorderableKeys: draggableThreadKeys,
+            reorderableKeys: draggableRowKeys,
             activeOrder: activeKeys,
             activeKeysById,
             activeReorderableKeys: activeReorderableThreadKeys,
@@ -3399,24 +3571,30 @@ export default function Sidebar() {
     draggedThreadKey,
     draggedFromSection,
     dragActivationY,
-    draggableThreadKeys,
+    draggableRowKeys,
     pinnedKeys,
     sidebarListItems,
+    stackGroups,
     threadByKey,
   ]);
   const handleThreadDragEnd = useCallback(
     (event: DragEndEvent) => {
-      const activeKey = String(event.active.id);
-      const activeSection = sectionByThreadKey.get(activeKey);
+      const draggedId = String(event.active.id);
       const target =
         event.over === null
           ? null
-          : resolveSidebarDropTarget(sidebarListItems, activeKey, String(event.over.id));
+          : resolveSidebarDropTarget(sidebarListItems, draggedId, String(event.over.id));
+      const run = resolveStackDragRunKeys({ groups: stackGroups, activeId: draggedId });
+      // planSidebarThreadDrop keys its pin/settle decisions off activeKey, so
+      // it must be the run's first member, not the marker id.
+      const activeKey = run[0] ?? draggedId;
+      const activeSection = sectionByThreadKey.get(activeKey);
       const activeThread = threadByKey.get(activeKey);
       if (activeSection === undefined || target === null || activeThread === undefined) return;
       const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
       const plan = planSidebarThreadDrop({
         activeKey,
+        activeRunKeys: run,
         activeSection,
         activePinned: activeThread.pinnedAt != null,
         activeSettled: activeThread.settledOverride === "settled",
@@ -3426,7 +3604,7 @@ export default function Sidebar() {
         target,
         pinnedOrder: pinnedKeys,
         pinnedKeysById,
-        reorderableKeys: draggableThreadKeys,
+        reorderableKeys: draggableRowKeys,
         activeOrder: activeKeys,
         activeKeysById,
         activeReorderableKeys: activeReorderableThreadKeys,
@@ -3540,7 +3718,7 @@ export default function Sidebar() {
       serverConfigs,
       activeKeys,
       activeReorderableThreadKeys,
-      draggableThreadKeys,
+      draggableRowKeys,
       pinThread,
       pinnedKeys,
       planForwardNavigation,
@@ -3549,6 +3727,7 @@ export default function Sidebar() {
       sectionByThreadKey,
       settleThread,
       sidebarListItems,
+      stackGroups,
       threadByKey,
       unpinThread,
       unsettleThread,
@@ -4585,6 +4764,14 @@ export default function Sidebar() {
                 onDragEnd={handleThreadDragEnd}
               >
                 <SidebarDragLifecycle onUnmount={cancelThreadDrag} />
+                {[...threadsByWorktree].map(([worktreePath, entry]) => (
+                  <StackStatusProbe
+                    key={worktreePath}
+                    environmentId={entry.environmentId}
+                    worktreePath={worktreePath}
+                    onStatus={handleStackStatus}
+                  />
+                ))}
                 <SortableContext items={sortableIds} strategy={sidebarSortingStrategy}>
                   <ul
                     ref={attachListMotionRef}
@@ -4724,9 +4911,7 @@ export default function Sidebar() {
                           <SortableThreadRow
                             key={threadKey}
                             id={threadKey}
-                            disabled={
-                              !draggableThreadKeys.has(threadKey) || optimisticDrop !== null
-                            }
+                            disabled={!draggableRowKeys.has(threadKey) || optimisticDrop !== null}
                           >
                             {(bag) => renderThreadRowInner(thread, section, bag)}
                           </SortableThreadRow>
@@ -4748,11 +4933,49 @@ export default function Sidebar() {
                       ];
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
-                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          const thread = threadByKey.get(item.key);
+                          // A stack's settled layer can sit outside the settled
+                          // shelf's own pagination window: buildStackGroups
+                          // reads the full settled list, so the group still
+                          // names it, but it never entered threadByKey (which
+                          // stays scoped to rendered rows). Skip it rather
+                          // than render an undefined thread — the header's
+                          // count still says it exists.
+                          if (thread === undefined) continue;
+                          items.push(renderThreadRow(thread, item.section));
                           continue;
                         }
-                        // Task 11 replaces this with a real stack row.
-                        if (item.kind === "stack") continue;
+                        if (item.kind === "stack") {
+                          const group = stackGroups.find(
+                            (candidate) => candidate.worktreePath === item.worktreePath,
+                          );
+                          if (group === undefined) continue;
+                          const markerId = stackMarkerId(item.worktreePath);
+                          items.push(
+                            <SortableThreadRow
+                              key={markerId}
+                              id={markerId}
+                              disabled={optimisticDrop !== null}
+                            >
+                              {(bag) => (
+                                <SidebarStackRow
+                                  group={group}
+                                  bottomBranch={
+                                    allThreadsByKey.get(group.memberKeys[0] ?? "")?.branch ?? null
+                                  }
+                                  collapsed={collapsedStackWorktrees.includes(item.worktreePath)}
+                                  busy={group.memberKeys.some(
+                                    (key) =>
+                                      allThreadsByKey.get(key)?.latestTurn?.state === "running",
+                                  )}
+                                  onToggleCollapsed={toggleStackCollapsed}
+                                  sortable={bag}
+                                />
+                              )}
+                            </SortableThreadRow>,
+                          );
+                          continue;
+                        }
                         switch (item.marker) {
                           case "pinned-header":
                             items.push(
