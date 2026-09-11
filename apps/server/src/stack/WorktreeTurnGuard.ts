@@ -1,4 +1,3 @@
-import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -135,11 +134,15 @@ export const make = Effect.gen(function* () {
       // git hiccup. The busy guard above does NOT depend on this read, so the
       // concurrency protection — the one that prevents two agents fighting
       // over a checkout — still holds when this degrades.
+      //
+      // `Effect.catch` only, not `catchCause`: this fail-open covers a failed
+      // status read, not a defect or this fiber's own interruption. Widening
+      // it to `catchCause` would silently absorb both of those too.
       const status = yield* vcsStatus.getStatus({ cwd: worktreePath }).pipe(
-        Effect.catchCause((cause) =>
+        Effect.catch((error) =>
           Effect.logWarning("stack turn guard could not read VCS status", {
             worktreePath,
-            detail: Cause.pretty(cause),
+            detail: error.message,
           }).pipe(Effect.as(null)),
         ),
       );
@@ -170,7 +173,7 @@ export const make = Effect.gen(function* () {
             changedFileCount: decision.changedFileCount,
           });
         case "checkout": {
-          yield* stacks.withStackPermit(
+          const outcome = yield* stacks.withStackPermit(
             worktreePath,
             cli.runAction({
               cwd: worktreePath,
@@ -178,6 +181,18 @@ export const make = Effect.gen(function* () {
               branch: decision.branch,
             }),
           );
+          // The guard's whole purpose is that HEAD IS the thread's branch
+          // before the agent runs. A checkout that did not happen must
+          // refuse the turn, not wave it through onto the wrong branch.
+          if (outcome._tag !== "ok") {
+            return yield* new StackViewFailedError({
+              worktreePath,
+              detail:
+                outcome._tag === "unavailable"
+                  ? `Could not check out ${decision.branch}: ${outcome.reason}`
+                  : `Could not check out ${decision.branch}: the worktree has conflicts`,
+            });
+          }
           yield* vcsStatus.refreshLocalStatus(worktreePath).pipe(Effect.ignore);
           // Signal 4: HEAD moved, so the cached chain is stale.
           yield* stacks.invalidate(worktreePath);
