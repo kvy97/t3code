@@ -125,8 +125,12 @@ export const make = Effect.gen(function* () {
         ),
       );
 
-      // The cached VCS status is the single source for HEAD and dirtiness;
-      // in the common case (HEAD already right) this costs zero spawns.
+      // The cached VCS status is the single source for HEAD and dirtiness.
+      // Local half only: this runs before the user's turn starts, and the
+      // full `getStatus` ends in a cached `git fetch` under the remote write
+      // lock on a cache miss — the first turn in a worktree after a server
+      // restart would block on a remote round trip. Nothing here reads the
+      // remote half, and in the common case (cache warm) it costs no spawn.
       //
       // Deliberate fail-open, not an oversight: if the status read fails we
       // cannot know HEAD, so the checkout/dirty guards degrade to "proceed".
@@ -138,7 +142,7 @@ export const make = Effect.gen(function* () {
       // `Effect.catch` only, not `catchCause`: this fail-open covers a failed
       // status read, not a defect or this fiber's own interruption. Widening
       // it to `catchCause` would silently absorb both of those too.
-      const status = yield* vcsStatus.getStatus({ cwd: worktreePath }).pipe(
+      const status = yield* vcsStatus.getLocalStatus(worktreePath).pipe(
         Effect.catch((error) =>
           Effect.logWarning("stack turn guard could not read VCS status", {
             worktreePath,
@@ -194,7 +198,8 @@ export const make = Effect.gen(function* () {
             });
           }
           yield* vcsStatus.refreshLocalStatus(worktreePath).pipe(Effect.ignore);
-          // Signal 4: HEAD moved, so the cached chain is stale.
+          // HEAD moved, so the cached chain is stale. Clearing it only:
+          // the next subscriber's read refills it, no event is published.
           yield* stacks.invalidate(worktreePath);
           return;
         }

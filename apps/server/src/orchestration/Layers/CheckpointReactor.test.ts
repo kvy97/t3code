@@ -341,6 +341,7 @@ describe("CheckpointReactor", () => {
     const refreshAfterTurn = Effect.sync(() => void pullRequestRefreshes.push(1));
     const vcsStatusBroadcasterLayer = Layer.succeed(VcsStatusBroadcaster, {
       getStatus: () => Effect.die("getStatus should not be called in this test"),
+      getLocalStatus: () => Effect.die("getLocalStatus should not be called in this test"),
       refreshLocalStatus: (cwd: string) =>
         Effect.sync(() => {
           options?.gitStatusRefreshCalls?.push(cwd);

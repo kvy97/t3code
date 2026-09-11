@@ -359,6 +359,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
           getStatus: () => Effect.die("getStatus should not be called in this test"),
+          getLocalStatus: () => Effect.die("getLocalStatus should not be called in this test"),
           refreshLocalStatus: () =>
             Effect.succeed({
               isRepo: true,

@@ -181,7 +181,11 @@ const guardLayerWithCheckoutOutcome = (
     ),
     Layer.provide(
       Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
-        getStatus: () => Effect.succeed(cleanMismatchedStatus),
+        // Local half only. `getStatus` ends in a cached fetch under the
+        // remote write lock on a cache miss, and this runs before the user's
+        // turn starts — reaching it here is the regression, so it dies.
+        getStatus: () => Effect.die("the turn guard must not read remote status"),
+        getLocalStatus: () => Effect.succeed(cleanMismatchedStatus),
         refreshLocalStatus: () => Effect.succeed(cleanMismatchedStatus),
       }),
     ),

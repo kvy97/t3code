@@ -188,6 +188,16 @@ export class VcsStatusBroadcaster extends Context.Service<
     readonly getStatus: (
       input: VcsStatusInput,
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
+    /**
+     * The local half only — HEAD, dirtiness, working-tree files — served from
+     * the same cache `getStatus` uses, but never reaching the remote branch.
+     * For callers on a latency-sensitive path that need nothing from the
+     * remote: `getStatus` on a cache miss ends in a cached fetch under the
+     * remote write lock.
+     */
+    readonly getLocalStatus: (
+      cwd: string,
+    ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
     readonly refreshLocalStatus: (
       cwd: string,
     ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
@@ -394,6 +404,13 @@ export const make = Effect.gen(function* () {
         return yield* updateCachedStatus(cwd, local, remote);
       }),
     );
+  });
+
+  const getLocalStatus: VcsStatusBroadcaster["Service"]["getLocalStatus"] = Effect.fn(
+    "VcsStatusBroadcaster.getLocalStatus",
+  )(function* (rawCwd) {
+    const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
+    return yield* getOrLoadLocalStatus(cwd);
   });
 
   const refreshLocalStatusCore = Effect.fn("VcsStatusBroadcaster.refreshLocalStatusCore")(
@@ -728,6 +745,7 @@ export const make = Effect.gen(function* () {
 
   return VcsStatusBroadcaster.of({
     getStatus,
+    getLocalStatus,
     refreshLocalStatus,
     refreshStatus,
     refreshPullRequestStatus,

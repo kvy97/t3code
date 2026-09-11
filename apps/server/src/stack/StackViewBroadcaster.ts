@@ -256,9 +256,16 @@ export const make = Effect.gen(function* () {
     });
 
   /**
-   * No poller. The cache is invalidated by four signals: a client subscribing
-   * with a cold cache, a turn finishing in the worktree, a `stack.action` run
-   * through T3, and a HEAD change seen by the cwd's VCS status.
+   * No poller. The cache is refilled by three signals: a client subscribing
+   * with an empty cache, a turn finishing in the worktree, and a
+   * `stack.action` run through T3. The turn guard's own checkout adds a
+   * fourth invalidation — HEAD moved, so the chain is stale — but it only
+   * clears the entry; the next subscriber's read is what refills it. No VCS
+   * status signal reaches this service.
+   *
+   * The cold-read path is silent for every reason the cache can be empty: a
+   * read is not an invalidation signal, so it writes the cache without
+   * publishing (see `writeCacheSilently`).
    *
    * Known hole: `gh stack add` typed straight into a terminal fires none of
    * them, and it ships unmitigated. A refresh button was rejected because the
