@@ -277,6 +277,14 @@ export function planPinnedReorder(input: {
  * A stack row moves its whole run of layers in one drop, so it needs N
  * consecutive keys between the neighbors — not one. Same fallback as the
  * single-thread path: a keyless neighbor means rewriting the section.
+ *
+ * `orderedIds` only lists rendered rows: a collapsed stack's hidden layers
+ * never appear in it, so `movedIds` (every layer, hidden or not) is often a
+ * strict superset. Contiguity is therefore checked only among the moved ids
+ * that DO appear — no foreign (non-moved) row sitting between them — and
+ * every moved id, present or not, still gets a fresh key from the same
+ * anchor pair. A hidden run collapsed to nothing (no member present) has no
+ * anchor to work from and is left alone, same as before.
  */
 export function planPinnedRunReorder(input: {
   readonly orderedIds: readonly string[];
@@ -288,9 +296,12 @@ export function planPinnedRunReorder(input: {
   if (movedIds.length === 1) {
     return planPinnedReorder({ orderedIds, keysById, movedId: movedIds[0]! });
   }
-  const start = orderedIds.indexOf(movedIds[0]!);
-  if (start === -1) return [];
-  const contiguous = movedIds.every((id, offset) => orderedIds[start + offset] === id);
+  const movedSet = new Set(movedIds);
+  const presentIndices = orderedIds.flatMap((id, index) => (movedSet.has(id) ? [index] : []));
+  if (presentIndices.length === 0) return [];
+  const start = presentIndices[0]!;
+  const end = presentIndices[presentIndices.length - 1]!;
+  const contiguous = presentIndices.every((index, offset) => index === start + offset);
   if (!contiguous) return [];
 
   const visibleIds = new Set(orderedIds);
@@ -298,8 +309,7 @@ export function planPinnedRunReorder(input: {
     [...keysById].flatMap(([id, key]) => (!visibleIds.has(id) && key != null ? [key] : [])),
   );
   const beforeId = start > 0 ? orderedIds[start - 1] : null;
-  const afterIndex = start + movedIds.length;
-  const afterId = afterIndex < orderedIds.length ? orderedIds[afterIndex] : null;
+  const afterId = end < orderedIds.length - 1 ? orderedIds[end + 1] : null;
   const beforeKey = beforeId != null ? (keysById.get(beforeId) ?? null) : null;
   const afterKey = afterId != null ? (keysById.get(afterId) ?? null) : null;
 

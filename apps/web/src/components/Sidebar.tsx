@@ -933,7 +933,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
 // Verb and icon on the lifted row while it hovers over another section. Uses
 // the same icons as the row actions and context menu so the drop reads as the
 // action it performs.
-const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
+export const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
   pin: (
     <>
       <PinIcon aria-hidden className="size-3" />
@@ -3370,7 +3370,14 @@ export default function Sidebar() {
   const handleThreadDragStart = useCallback(
     (event: DragStartEvent) => {
       const activeKey = String(event.active.id);
-      const activeSection = sectionByThreadKey.get(activeKey);
+      // A stack marker isn't in sectionByThreadKey (built from real thread
+      // ids only); resolve its run and read the section off the run's first
+      // member instead. dragState.activeKey itself stays the raw dragged id
+      // — a marker id for a stack drag — so every existing "does this row
+      // match the drag" comparison (the vanished-row effect, the drop-verb
+      // badge) keeps working unchanged for both rows and stack markers.
+      const run = resolveStackDragRunKeys({ groups: stackGroups, activeId: activeKey });
+      const activeSection = sectionByThreadKey.get(run[0] ?? activeKey);
       if (activeSection === undefined) return;
       // Stop normal section motion before dnd-kit measures the picked-up row.
       listMotionRef.current?.suspend();
@@ -3393,7 +3400,7 @@ export default function Sidebar() {
           event.activatorEvent instanceof PointerEvent ? event.activatorEvent.clientY : null,
       });
     },
-    [sectionByThreadKey],
+    [sectionByThreadKey, stackGroups],
   );
   // Include every visible row in the measured order. Older servers disable
   // pickup on their rows without changing where those rows render.
@@ -3441,9 +3448,11 @@ export default function Sidebar() {
     visibleSnoozedThreads,
   ]);
   useEffect(() => {
+    // sidebarListItemId (not a thread-only match) so a dragged stack marker
+    // is recognized too: it never vanishes just because its group collapses.
     if (
       dragState !== null &&
-      !sidebarListItems.some((item) => item.kind === "thread" && item.key === dragState.activeKey)
+      !sidebarListItems.some((item) => sidebarListItemId(item) === dragState.activeKey)
     ) {
       cancelThreadDrag();
     }
@@ -4969,6 +4978,14 @@ export default function Sidebar() {
                                       allThreadsByKey.get(key)?.latestTurn?.state === "running",
                                   )}
                                   onToggleCollapsed={toggleStackCollapsed}
+                                  dropVerb={
+                                    dragState?.activeKey === markerId
+                                      ? resolveSidebarDropVerb(
+                                          dragState.activeSection,
+                                          dragTargetSection,
+                                        )
+                                      : null
+                                  }
                                   sortable={bag}
                                 />
                               )}

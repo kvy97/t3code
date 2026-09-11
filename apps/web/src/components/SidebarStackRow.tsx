@@ -10,7 +10,8 @@ import {
   resolveStackRowLabel,
   type StackGroup,
 } from "./Sidebar.stack.logic";
-import type { SortableThreadRowBag } from "./Sidebar";
+import { dropVerbBadge, type SortableThreadRowBag } from "./Sidebar";
+import type { SidebarDropVerb } from "./Sidebar.logic";
 
 const SidebarStackRow = memo(function SidebarStackRow(props: {
   group: StackGroup;
@@ -22,6 +23,9 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
       repainting sidebar. */
   busy: boolean;
   onToggleCollapsed: (worktreePath: string) => void;
+  /** What dropping the whole run where it currently hovers would do — same
+      verb badge a plain thread row shows while it's the one being dragged. */
+  dropVerb: SidebarDropVerb | null;
   /** Present when the server supports every drop outcome (mirrors
       SidebarThreadRow's own `sortable` prop): dnd-kit's sortable bag applied
       to the row root so the whole row drags. */
@@ -53,6 +57,18 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
         ...sortable.listeners,
       }
     : {};
+  // Same overlay as SidebarThreadRow's `dragDestination`: only while this
+  // row is the one actually lifted, so a hover elsewhere in the sidebar
+  // never paints a verb on a row that isn't moving.
+  const dragDestination =
+    sortable?.isDragging && props.dropVerb !== null ? (
+      <span
+        role="status"
+        className="pointer-events-none ml-auto inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-primary/40 bg-primary/10 px-1.5 text-[11px] font-medium text-primary"
+      >
+        {dropVerbBadge[props.dropVerb]}
+      </span>
+    ) : null;
 
   return (
     <li data-thread-selection-safe className="list-none" {...sortableRootProps}>
@@ -97,6 +113,7 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
             </TooltipPopup>
           </Tooltip>
         )}
+        {dragDestination}
       </button>
     </li>
   );

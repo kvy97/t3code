@@ -397,4 +397,45 @@ describe("planPinnedRunReorder", () => {
 
     expect(assignments).toEqual([]);
   });
+
+  it("assigns keys to every moved id, even ones a collapsed group hides from orderedIds", () => {
+    // Mirrors dragging a collapsed stack row: "base" and "top" are real run
+    // members but neither one renders while the group is collapsed, so
+    // orderedIds (built from rendered rows only) carries just "mid".
+    const assignments = planPinnedRunReorder({
+      orderedIds: ["a", "mid", "b"],
+      keysById: new Map([
+        ["a", "f"],
+        ["b", "t"],
+      ]),
+      movedIds: ["base", "mid", "top"],
+    });
+
+    expect(assignments.map((assignment) => assignment.id)).toEqual(["base", "mid", "top"]);
+    const [first, second, third] = assignments;
+    expect(first!.orderKey > "f").toBe(true);
+    expect(second!.orderKey > first!.orderKey).toBe(true);
+    expect(third!.orderKey > second!.orderKey).toBe(true);
+    expect(third!.orderKey < "t").toBe(true);
+  });
+
+  it("returns nothing when present members aren't contiguous, even with valid keys throughout", () => {
+    // r2 is hidden (never in orderedIds); r1 and r3 are both present, but "a"
+    // — a row nobody is moving — sits between them, so the present block
+    // isn't contiguous. Every key here is valid base-26: if contiguity were
+    // skipped, r1 and r3 would resolve as usable (null-bounded) anchors and
+    // this would return three real assignments instead of [] — this fixture
+    // fails for the contiguity check specifically, not incidentally.
+    const assignments = planPinnedRunReorder({
+      orderedIds: ["r1", "a", "r3"],
+      keysById: new Map([
+        ["r1", "f"],
+        ["a", "m"],
+        ["r3", "t"],
+      ]),
+      movedIds: ["r1", "r2", "r3"],
+    });
+
+    expect(assignments).toEqual([]);
+  });
 });
