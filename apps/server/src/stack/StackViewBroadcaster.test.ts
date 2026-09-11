@@ -102,6 +102,50 @@ describe("StackViewBroadcaster", () => {
     }),
   );
 
+  it.effect("skips the turn-completion refresh while gh itself is missing", () =>
+    Effect.gen(function* () {
+      const view = vi.fn(() =>
+        Effect.succeed({ _tag: "unavailable", reason: "gh-missing" } as const),
+      );
+
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* StackViewBroadcaster.StackViewBroadcaster;
+        yield* broadcaster.getStack("/repo/wt");
+        assert.equal(view.mock.calls.length, 1);
+
+        // Every turn completion in every worktree calls this, on a serial
+        // worker kept off the slow path. Nothing a turn did can install gh.
+        yield* broadcaster.refreshStack("/repo/wt");
+        yield* broadcaster.refreshStack("/repo/wt");
+        assert.equal(view.mock.calls.length, 1);
+
+        // The TTL still governs: gh installed mid-session must show up.
+        yield* TestClock.adjust(StackViewBroadcaster.STACK_UNAVAILABLE_TTL);
+        yield* broadcaster.refreshStack("/repo/wt");
+        assert.equal(view.mock.calls.length, 2);
+      }).pipe(Effect.provide(makeLayer(view)));
+    }),
+  );
+
+  it.effect("still re-reads a not-a-stack worktree, which gh stack add changes", () =>
+    Effect.gen(function* () {
+      const view = vi.fn(() =>
+        Effect.succeed({ _tag: "unavailable", reason: "not-a-stack" } as const),
+      );
+
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* StackViewBroadcaster.StackViewBroadcaster;
+        yield* broadcaster.getStack("/repo/wt");
+        assert.equal(view.mock.calls.length, 1);
+
+        // "not a stack" is worktree state, and `gh stack add` during the turn
+        // is exactly the thing that changes it.
+        yield* broadcaster.refreshStack("/repo/wt");
+        assert.equal(view.mock.calls.length, 2);
+      }).pipe(Effect.provide(makeLayer(view)));
+    }),
+  );
+
   it.effect("re-reads after an explicit invalidate", () =>
     Effect.gen(function* () {
       const view = vi.fn(() => Effect.succeed(viewOf(["feat/base"])));

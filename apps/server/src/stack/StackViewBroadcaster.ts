@@ -9,7 +9,12 @@ import * as Ref from "effect/Ref";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
-import type { StackStatus, StackViewFailedError, StackViewInput } from "@t3tools/contracts";
+import type {
+  StackStatus,
+  StackUnavailableReason,
+  StackViewFailedError,
+  StackViewInput,
+} from "@t3tools/contracts";
 
 import * as GhStackCli from "./GhStackCli.ts";
 
@@ -19,6 +24,19 @@ import * as GhStackCli from "./GhStackCli.ts";
  * again. Short enough that installing `gh` shows up without a restart.
  */
 export const STACK_UNAVAILABLE_TTL = Duration.seconds(30);
+
+/**
+ * Reasons that describe the environment rather than this worktree. Nothing a
+ * turn does can change them, so a turn-completion refresh may trust an
+ * unexpired cached one instead of spawning `gh` again. `not-a-stack` and
+ * `conflicting-local-state` are worktree state and must always re-read —
+ * `gh stack add` inside the turn is exactly what changes them.
+ */
+const ENVIRONMENT_UNAVAILABLE_REASONS = new Set<StackUnavailableReason>([
+  "gh-missing",
+  "extension-missing",
+  "gh-unauthenticated",
+]);
 
 interface CachedStack {
   readonly fingerprint: string;
@@ -184,20 +202,44 @@ export const make = Effect.gen(function* () {
     worktreePath,
   ) => readStack(worktreePath).pipe(Effect.flatMap((read) => publishIfChanged(worktreePath, read)));
 
+  /**
+   * Runs on every turn completion, in every worktree — including ones that
+   * will never show a stack row — on a serial worker deliberately kept off
+   * the slow path. A machine with no `gh` would pay a failing spawn forever,
+   * and a spawn here can sit behind a `gh stack sync` holding this cwd's
+   * permit for up to two minutes, stalling PR refresh and branch drift for
+   * every other thread. So an unexpired environment-level "unavailable"
+   * short-circuits: nothing a turn did can have changed it.
+   */
   const refreshStack: StackViewBroadcaster["Service"]["refreshStack"] = (worktreePath) =>
-    withStackPermit(worktreePath, refreshStackWithinPermit(worktreePath));
+    Effect.gen(function* () {
+      const cached = yield* unexpiredCached(worktreePath);
+      if (
+        cached !== null &&
+        cached.status._tag === "unavailable" &&
+        ENVIRONMENT_UNAVAILABLE_REASONS.has(cached.status.reason)
+      ) {
+        return cached.status;
+      }
+      return yield* withStackPermit(worktreePath, refreshStackWithinPermit(worktreePath));
+    });
+
+  /** The cached entry for this cwd, or null when there is none or it expired. */
+  const unexpiredCached = Effect.fn("StackViewBroadcaster.unexpiredCached")(function* (
+    worktreePath: string,
+  ) {
+    const cached = yield* Ref.get(cacheRef).pipe(
+      Effect.map((cache) => cache.get(worktreePath) ?? null),
+    );
+    if (cached === null) return null;
+    const nowMillis = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
+    return cached.expiresAtMillis === null || cached.expiresAtMillis > nowMillis ? cached : null;
+  });
 
   const getStack: StackViewBroadcaster["Service"]["getStack"] = (worktreePath) =>
     Effect.gen(function* () {
-      const cached = yield* Ref.get(cacheRef).pipe(
-        Effect.map((cache) => cache.get(worktreePath) ?? null),
-      );
-      if (cached !== null) {
-        const nowMillis = yield* DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
-        if (cached.expiresAtMillis === null || cached.expiresAtMillis > nowMillis) {
-          return cached.status;
-        }
-      }
+      const cached = yield* unexpiredCached(worktreePath);
+      if (cached !== null) return cached.status;
       return yield* withStackPermit(
         worktreePath,
         readStack(worktreePath).pipe(
