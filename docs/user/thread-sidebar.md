@@ -108,7 +108,7 @@ follows its most active member, so a stack whose bottom pull request already
 merged stays in your active list until every layer is settled.
 
 Merging a stack whose base branch uses a merge queue queues it rather than
-landing it right away, and the row says so until the queue processes it.
+landing it right away, and T3 Code tells you which of the two happened.
 
 Conflicts are not resolved here. When a stack action stops on one, T3 Code
 opens that worktree's terminal so you can finish in git.

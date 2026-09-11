@@ -32,6 +32,9 @@ export interface StackGroup {
   readonly visibleMemberKeys: readonly string[];
   readonly hiddenMemberKeys: readonly string[];
   readonly layerCount: number;
+  /** Every thread on the worktree, including the snoozed ones `memberKeys`
+      leaves out: what the row's count has to measure itself against. */
+  readonly memberCount: number;
   readonly stackNumber: number | null;
   readonly unavailableReason: StackUnavailableReason | null;
   /** `unavailableReason === null` is not the same as "there is a stack":
@@ -137,6 +140,7 @@ export function buildStackGroups(sources: ReadonlyArray<StackGroupSource>): Stac
         visibleMemberKeys,
         hiddenMemberKeys: ordered.map((member) => member.key).filter((key) => !visible.has(key)),
         layerCount: status?._tag === "available" ? status.layers.length : 0,
+        memberCount: source.members.length,
         stackNumber: status?._tag === "available" ? status.stackNumber : null,
         unavailableReason: status?._tag === "unavailable" ? status.reason : null,
         availability,
@@ -249,18 +253,20 @@ export function describeStackUnavailable(reason: StackUnavailableReason): {
 
 /**
  * A collapsed group — or one whose bottom layer is snoozed onto its own
- * shelf — renders a header above exactly one visible row. That header's
- * count is the only signal that a hidden layer exists at all, so it must
+ * shelf — renders a header above fewer rows than the stack has. That
+ * header's count is the only signal that the rest exists at all, so it must
  * read as "1 of 2 layers", not just "2 layers" sitting oddly over one row.
+ * A snoozed layer never reaches `hiddenMemberKeys` (that set suppresses
+ * rows, and the snoozed row still renders on its own shelf), so the
+ * comparison is against the total, not against that set.
  */
 export function formatStackLayerCountLabel(group: StackGroup): string {
   // Only a stack that actually read back has layers to count; loading and
   // failed both counted as "0 layers" while the read said nothing at all.
   const layers = group.availability === "available";
-  const total = layers ? group.layerCount : group.memberKeys.length;
+  const total = layers ? group.layerCount : group.memberCount;
   const noun = layers ? "layer" : "thread";
   const label = `${total} ${noun}${total === 1 ? "" : "s"}`;
-  return group.hiddenMemberKeys.length === 0
-    ? label
-    : `${group.visibleMemberKeys.length} of ${label}`;
+  const visible = group.visibleMemberKeys.length;
+  return visible < total ? `${visible} of ${label}` : label;
 }

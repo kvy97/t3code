@@ -1045,6 +1045,7 @@ function OpenCommandPaletteDialog(props: {
         activeThreadStackStatus._tag === "available" ? activeThreadStackStatus.layers.length : 0,
       stackNumber:
         activeThreadStackStatus._tag === "available" ? activeThreadStackStatus.stackNumber : null,
+      memberCount: activeThreadWorktreeThreadCount,
       unavailableReason:
         activeThreadStackStatus._tag === "unavailable" ? activeThreadStackStatus.reason : null,
       availability: activeThreadStackStatus._tag,

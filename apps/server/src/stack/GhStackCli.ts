@@ -186,12 +186,11 @@ export const make = Effect.gen(function* () {
       timeoutMs: DEFAULT_TIMEOUT_MS,
     }).pipe(
       Effect.matchEffect({
-        // Explicit return types here (rather than leaving TS to infer them)
-        // are load-bearing: each branch below returns Effect.succeed/fail
-        // with a *different* narrowed literal, and matchEffect's generics
-        // bind per-callback, not per-branch. Left uninferred, TS tries to
-        // unify those distinct Effect<...> shapes into one signature and
-        // spills the requirements channel to `unknown` instead of `never`.
+        // Explicit return types on these two callbacks are load-bearing
+        // here: left uninferred, this pair of branches spills the
+        // requirements channel to `unknown` instead of `never`. Other
+        // matchEffect callbacks in this repo infer fine — do not read this
+        // as a rule about matchEffect.
         onFailure: (error): Effect.Effect<GhStackViewOutcome, StackViewFailedError> => {
           const classified = classifyGhStackVcsError(error);
           return "reason" in classified

@@ -350,6 +350,21 @@ describe("formatStackLayerCountLabel", () => {
     expect(formatStackLayerCountLabel(group!)).toBe("2 threads");
   });
 
+  it("counts a snoozed layer out of the visible run but into the total", () => {
+    // The snoozed layer renders on its own shelf, so the group's header sits
+    // over one row while the chain still has two layers.
+    const [group] = buildStackGroups([
+      source({
+        members: [
+          { key: "e1:t-base", branch: "feat/base", section: "snoozed" },
+          { key: "e1:t-top", branch: "feat/top", section: "active" },
+        ],
+      }),
+    ]);
+    expect(group?.hiddenMemberKeys).toEqual([]);
+    expect(formatStackLayerCountLabel(group!)).toBe("1 of 2 layers");
+  });
+
   it("counts threads while the read is in flight and after it failed", () => {
     // Both leave `unavailableReason` null, so a label that reads it alone
     // claims a layer count nobody has read — "0 layers" over two rows.

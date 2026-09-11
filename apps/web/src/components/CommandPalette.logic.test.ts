@@ -482,6 +482,7 @@ describe("buildStackActionItems", () => {
     hiddenMemberKeys: [],
     layerCount: 2,
     stackNumber: 7,
+    memberCount: 2,
     unavailableReason: null,
     availability: "available",
   } as const;

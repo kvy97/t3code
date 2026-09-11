@@ -254,7 +254,9 @@ export function resolveSidebarDropVerb(
 export function planSidebarThreadDrop(input: {
   readonly activeKey: string;
   /** The contiguous run this drop moves. A stack row moves all its layers;
-      anything else moves the one row and defaults to `[activeKey]`. */
+      anything else moves the one row and defaults to `[activeKey]`.
+      `activeRunKeys[0]` must be `activeKey`: the pin branch reads the moved
+      row's own key back out of the run's assignments by that id. */
   readonly activeRunKeys?: readonly string[];
   readonly activeSection: SidebarSection;
   /** Snoozed threads can retain pinning and settlement beneath the shelf. */
