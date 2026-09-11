@@ -3,7 +3,9 @@ import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools
 import type { Thread } from "../types";
 import {
   buildBrowseGroups,
+  buildStackActionItems,
   buildThreadActionItems,
+  describeStackActionResult,
   enumerateCommandPaletteItems,
   filterPinnedBrowseEntries,
   filterCommandPaletteGroups,
@@ -468,5 +470,73 @@ describe("filterPinnedBrowseEntries", () => {
       visibleEntries: windowsEntries,
       exactEntry: windowsEntries[0],
     });
+  });
+});
+
+describe("buildStackActionItems", () => {
+  const group = {
+    worktreePath: "/repo/wt",
+    section: "active",
+    memberKeys: ["e1:t-base", "e1:t-top"],
+    visibleMemberKeys: ["e1:t-base", "e1:t-top"],
+    hiddenMemberKeys: [],
+    layerCount: 2,
+    stackNumber: 7,
+    unavailableReason: null,
+  } as const;
+
+  it("offers the four whole-stack actions", async () => {
+    const ran: string[] = [];
+    const items = buildStackActionItems({
+      group,
+      worktreeLabel: "wt",
+      icon: null,
+      runAction: async (action) => {
+        ran.push(action);
+      },
+    });
+
+    expect(items.map((item) => item.value)).toEqual([
+      "stack:/repo/wt:submit",
+      "stack:/repo/wt:sync",
+      "stack:/repo/wt:rebaseUpstack",
+      "stack:/repo/wt:merge",
+    ]);
+    await items[1]!.run();
+    expect(ran).toEqual(["sync"]);
+  });
+
+  it("offers nothing when the stack backend is unavailable", () => {
+    const items = buildStackActionItems({
+      group: { ...group, unavailableReason: "gh-missing" },
+      worktreeLabel: "wt",
+      icon: null,
+      runAction: async () => {},
+    });
+
+    expect(items).toEqual([]);
+  });
+
+  it("finds an action by the stack number and the worktree name", () => {
+    const [submit] = buildStackActionItems({
+      group,
+      worktreeLabel: "wt",
+      icon: null,
+      runAction: async () => {},
+    });
+
+    expect(submit!.searchTerms).toContain("wt");
+    expect(submit!.searchTerms).toContain("7");
+  });
+});
+
+describe("describeStackActionResult", () => {
+  it("distinguishes a queued stack from a merged one", () => {
+    expect(describeStackActionResult({ action: "merge", mergeDisposition: "queued" })).toBe(
+      "Stack queued for merge",
+    );
+    expect(describeStackActionResult({ action: "merge", mergeDisposition: "merged" })).toBe(
+      "Stack merged",
+    );
   });
 });

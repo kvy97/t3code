@@ -1,18 +1,30 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
+import { StackActionConflictedError, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import {
   ChevronDownIcon,
   FolderGit2Icon,
   FolderGitIcon,
   FolderIcon,
   HistoryIcon,
+  LayersPlusIcon,
   ScaleIcon,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useProject, useThread, useThreadShellsForProjectRefs } from "../state/entities";
+import { useEnvironmentQuery } from "../state/query";
+import { stackEnvironment } from "../state/stack";
+import { useAtomCommand } from "../state/use-atom-command";
+import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import {
   type EnvMode,
   type EnvironmentOption,
@@ -28,6 +40,7 @@ import {
 import { BranchToolbarBranchSelector } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
+import { describeStackActionResult } from "./CommandPalette.logic";
 import { Button } from "./ui/button";
 import {
   Menu,
@@ -39,12 +52,13 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "./ui/menu";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Separator } from "./ui/separator";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { composerFloatingLayerProps } from "./chat/composerEventScope";
 import { measureRestingComposerControls } from "./chat/restingComposerControlsMeasurement";
 import { resolveRestingComposerControlsNaturalWidth } from "./composerFooterLayout";
-import { cn } from "~/lib/utils";
+import { cn, randomHex } from "~/lib/utils";
 
 interface BranchToolbarProps {
   environmentId: EnvironmentId;
@@ -530,6 +544,70 @@ export const BranchToolbar = memo(function BranchToolbar({
   const [stripElement, setStripElement] = useState<HTMLDivElement | null>(null);
   const labelsOverflow = useLabelsOverflow(stripElement);
 
+  const stackStatusQuery = useEnvironmentQuery(
+    activeWorktreePath !== null
+      ? stackEnvironment.status({ environmentId, input: { worktreePath: activeWorktreePath } })
+      : null,
+  );
+  const stackAvailable = stackStatusQuery.data?._tag === "available";
+  const handleNewThread = useNewThreadHandler();
+  const addStackLayerAction = useAtomCommand(
+    stackEnvironment.runAction,
+    "branch-toolbar:add-stack-layer",
+  );
+  const [isAddingStackLayer, setIsAddingStackLayer] = useState(false);
+  const onNewThreadInStack = useCallback(async () => {
+    if (!activeWorktreePath || !activeProjectRef || isAddingStackLayer) return;
+    setIsAddingStackLayer(true);
+    try {
+      // Same default naming a fresh worktree gets; the branch only needs to
+      // exist before the draft thread points at it.
+      const branch = buildTemporaryWorktreeBranchName(randomHex);
+      const result = await addStackLayerAction({
+        environmentId,
+        input: { worktreePath: activeWorktreePath, action: "addLayer", branch },
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        // Conflict resolution stays out of the UI: point at the terminal for
+        // this thread's own worktree and let the user resolve it there.
+        if (Schema.is(StackActionConflictedError)(error)) {
+          useTerminalUiStateStore.getState().setTerminalOpen(threadRef, true);
+        }
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not add a layer to the stack",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({ type: "success", title: describeStackActionResult(result.value) }),
+      );
+      // addLayer already created the branch; the thread reuses this same
+      // worktree, so no prepareWorktree bootstrap is needed here.
+      await handleNewThread(activeProjectRef, {
+        branch,
+        worktreePath: activeWorktreePath,
+        envMode: "worktree",
+        startFromOrigin: false,
+      });
+    } finally {
+      setIsAddingStackLayer(false);
+    }
+  }, [
+    activeProjectRef,
+    activeWorktreePath,
+    addStackLayerAction,
+    environmentId,
+    handleNewThread,
+    isAddingStackLayer,
+    threadRef,
+  ]);
+
   if (!hasActiveThread || !activeProject) return null;
 
   return (
@@ -614,6 +692,20 @@ export const BranchToolbar = memo(function BranchToolbar({
           data-chat-resting-composer-controls-host="true"
           className="flex min-w-0 flex-1 items-center justify-start overflow-x-clip overflow-y-visible"
         />
+      ) : null}
+
+      {showGitControls && stackAvailable ? (
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label="New thread in this stack"
+          title="New thread in this stack"
+          disabled={isAddingStackLayer}
+          onClick={() => void onNewThreadInStack()}
+          data-composer-context-control
+        >
+          <LayersPlusIcon />
+        </Button>
       ) : null}
 
       {showGitControls ? (

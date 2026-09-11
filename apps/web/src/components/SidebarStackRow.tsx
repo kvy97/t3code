@@ -1,8 +1,28 @@
-import { memo } from "react";
+import { memo, useCallback, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronDown, ChevronRight, Layers } from "lucide-react";
 import { CSS } from "@dnd-kit/utilities";
+import * as Schema from "effect/Schema";
+
+import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  isAtomCommandInterrupted,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import {
+  StackActionConflictedError,
+  type ContextMenuItem,
+  type StackActionKind,
+} from "@t3tools/contracts";
 
 import { cn } from "../lib/utils";
+import { readLocalApi } from "../localApi";
+import { stackEnvironment } from "../state/stack";
+import { useAtomCommand } from "../state/use-atom-command";
+import { useEnvironmentQuery } from "../state/query";
+import { useTerminalUiStateStore } from "../terminalUiStateStore";
+import { describeStackActionResult } from "./CommandPalette.logic";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import {
   describeStackUnavailable,
@@ -12,6 +32,46 @@ import {
 } from "./Sidebar.stack.logic";
 import { dropVerbBadge, type SortableThreadRowBag } from "./Sidebar";
 import type { SidebarDropVerb } from "./Sidebar.logic";
+
+const STACK_ROW_WHOLE_STACK_ACTIONS: ReadonlyArray<{
+  readonly action: Extract<StackActionKind, "submit" | "sync" | "rebaseUpstack" | "merge">;
+  readonly label: string;
+}> = [
+  { action: "submit", label: "Submit stack" },
+  { action: "sync", label: "Sync stack" },
+  { action: "rebaseUpstack", label: "Rebase upstack" },
+  { action: "merge", label: "Merge stack" },
+];
+
+type StackRowMenuId =
+  | (typeof STACK_ROW_WHOLE_STACK_ACTIONS)[number]["action"]
+  | `checkout:${string}`;
+
+/** The row's right-click menu: the four whole-stack actions plus a checkout
+    entry per layer, ordered bottom-to-top the way the layers render below
+    the row. Disabled entirely while a member thread is running — the server
+    guards the same condition, so this only prevents a click that would fail
+    for a reason the user can already see (the running-thread dot). */
+function buildStackRowMenuItems(input: {
+  readonly layers: ReadonlyArray<{ readonly branch: string; readonly position: number }>;
+  readonly busy: boolean;
+}): ContextMenuItem<StackRowMenuId>[] {
+  const items: ContextMenuItem<StackRowMenuId>[] = STACK_ROW_WHOLE_STACK_ACTIONS.map((entry) => ({
+    id: entry.action,
+    label: entry.label,
+    disabled: input.busy,
+  }));
+  const layers = [...input.layers].sort((left, right) => left.position - right.position);
+  layers.forEach((layer, index) => {
+    items.push({
+      id: `checkout:${layer.branch}`,
+      label: `Check out ${layer.branch}`,
+      disabled: input.busy,
+      ...(index === 0 ? { separatorBefore: true } : {}),
+    });
+  });
+  return items;
+}
 
 const SidebarStackRow = memo(function SidebarStackRow(props: {
   group: StackGroup;
@@ -39,6 +99,88 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
   const unavailable =
     group.unavailableReason === null ? null : describeStackUnavailable(group.unavailableReason);
   const Chevron = props.collapsed ? ChevronRight : ChevronDown;
+
+  // Member keys are scoped thread keys ("<environmentId>:<threadId>"); the
+  // bottom layer's environment is the worktree's environment, and — absent
+  // any live "checked out branch" signal in this row — also the fallback
+  // target for a conflict's terminal.
+  const bottomMemberRef = parseScopedThreadKey(group.memberKeys[0] ?? "");
+  const environmentId = bottomMemberRef?.environmentId ?? null;
+
+  const stackStatusQuery = useEnvironmentQuery(
+    environmentId !== null && group.unavailableReason === null
+      ? stackEnvironment.status({ environmentId, input: { worktreePath: group.worktreePath } })
+      : null,
+  );
+  const layers = stackStatusQuery.data?._tag === "available" ? stackStatusQuery.data.layers : [];
+
+  const runStackActionCommand = useAtomCommand(
+    stackEnvironment.runAction,
+    "sidebar-stack-row:run-action",
+  );
+  const runStackAction = useCallback(
+    async (action: StackActionKind, branch?: string) => {
+      if (environmentId === null) return;
+      const result = await runStackActionCommand({
+        environmentId,
+        input: { worktreePath: group.worktreePath, action, ...(branch ? { branch } : {}) },
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        // Conflict resolution stays out of the UI: point at the terminal for
+        // the checked-out thread and let the user resolve it there.
+        if (Schema.is(StackActionConflictedError)(error) && bottomMemberRef) {
+          useTerminalUiStateStore
+            .getState()
+            .setTerminalOpen(
+              scopeThreadRef(bottomMemberRef.environmentId, bottomMemberRef.threadId),
+              true,
+            );
+        }
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Stack action failed",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: describeStackActionResult(result.value),
+        }),
+      );
+    },
+    [bottomMemberRef, environmentId, group.worktreePath, runStackActionCommand],
+  );
+
+  const handleContextMenu = useCallback(
+    (event: ReactMouseEvent) => {
+      event.preventDefault();
+      if (environmentId === null || group.unavailableReason !== null) return;
+      void (async () => {
+        const api = readLocalApi();
+        if (!api) return;
+        const items = buildStackRowMenuItems({ layers, busy: props.busy });
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(items, { x: event.clientX, y: event.clientY }),
+        );
+        if (clicked._tag === "Failure" || clicked.value === null) return;
+        if (clicked.value.startsWith("checkout:")) {
+          void runStackAction("checkout", clicked.value.slice("checkout:".length));
+          return;
+        }
+        void runStackAction(
+          clicked.value as Extract<StackActionKind, "submit" | "sync" | "rebaseUpstack" | "merge">,
+        );
+      })();
+    },
+    [environmentId, group.unavailableReason, layers, props.busy, runStackAction],
+  );
+
   // Same dnd-kit wiring as SidebarThreadRow's `sortableRootProps`: the row
   // root carries the ref, translate transform, and pointer listeners so the
   // whole row is the drag handle (the pointer sensor's distance threshold
@@ -71,7 +213,12 @@ const SidebarStackRow = memo(function SidebarStackRow(props: {
     ) : null;
 
   return (
-    <li data-thread-selection-safe className="list-none" {...sortableRootProps}>
+    <li
+      data-thread-selection-safe
+      className="list-none"
+      onContextMenu={handleContextMenu}
+      {...sortableRootProps}
+    >
       <button
         type="button"
         aria-expanded={!props.collapsed}
