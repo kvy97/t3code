@@ -10344,11 +10344,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             // The guard reads HEAD/dirtiness for the checkout/dirty checks
             // and fails open on a read error; the busy check below does
             // not depend on this at all, so failing here proves the busy
-            // refusal alone is what blocks the turn.
-            getStatus: () =>
+            // refusal alone is what blocks the turn. The local half only:
+            // the guard runs before the turn starts and must not reach the
+            // remote fetch `getStatus` ends in on a cache miss.
+            getLocalStatus: () =>
               Effect.fail(
                 new GitManagerError({
-                  operation: "getStatus",
+                  operation: "getLocalStatus",
                   cwd: worktreePath,
                   detail: "not modeled in this test",
                 }),
