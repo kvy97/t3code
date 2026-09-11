@@ -282,6 +282,59 @@ describe("insertStackGroupsIntoSidebarItems", () => {
     expect(next.some((item) => item.kind === "thread" && item.key === "e1:t-base")).toBe(false);
     expect(next.some((item) => item.kind === "thread" && item.key === "e1:t-top")).toBe(true);
   });
+
+  it("collapses only its own members, never the settled rows beside them", () => {
+    // The shape that reads as a bug on screen and is not one. The settled
+    // shelf paginates (SETTLED_TAIL_INITIAL_COUNT), so a group's other
+    // members can sit outside the rendered window while unrelated settled
+    // rows sit directly under the one member that is inside it. Collapsing
+    // then changes only the header, because there was never more than one
+    // member row on screen to hide — and the rows underneath belong to no
+    // group, so they must not move or vanish in either state.
+    const members = [
+      { key: "e1:m0", branch: "feat/x", section: "settled" as const },
+      { key: "e1:m1", branch: "feat/x", section: "settled" as const },
+      { key: "e1:m2", branch: "feat/x", section: "settled" as const },
+    ];
+    // Only m0 is inside the window; m1 and m2 are paginated out.
+    const rendered: readonly SidebarListItem[] = [
+      { kind: "marker", marker: "settled-header" },
+      { kind: "thread", key: "e1:m0", section: "settled" },
+      { kind: "thread", key: "e1:neighbour-a", section: "settled" },
+      { kind: "thread", key: "e1:neighbour-b", section: "settled" },
+    ];
+    const listWhenCollapsed = (collapsed: boolean) =>
+      insertStackGroupsIntoSidebarItems({
+        items: rendered,
+        groups: buildStackGroups([
+          {
+            worktreePath: "/repo/wt",
+            status: null,
+            members,
+            collapsed,
+            checkedOutBranch: null,
+            routeKey: null,
+          },
+        ]),
+      });
+    const keysOf = (collapsed: boolean) =>
+      listWhenCollapsed(collapsed).flatMap((item) => (item.kind === "thread" ? [item.key] : []));
+
+    // Expanded emits every member, paginated-out ones included; the render
+    // loop drops those because they never entered threadByKey.
+    expect(keysOf(false)).toEqual(["e1:m0", "e1:m1", "e1:m2", "e1:neighbour-a", "e1:neighbour-b"]);
+    // Collapsed drops the group's other members and nothing else.
+    expect(keysOf(true)).toEqual(["e1:m0", "e1:neighbour-a", "e1:neighbour-b"]);
+    // And the neighbours never join the run, in either state — that is what
+    // stops the stack row dragging them along with it.
+    for (const collapsed of [false, true]) {
+      expect(
+        listWhenCollapsed(collapsed).flatMap((item) =>
+          item.kind === "thread" && item.stackWorktreePath !== undefined ? [item.key] : [],
+        ),
+      ).toEqual(collapsed ? ["e1:m0"] : ["e1:m0", "e1:m1", "e1:m2"]);
+    }
+  });
 });
 
 describe("resolveStackDragRunKeys", () => {
