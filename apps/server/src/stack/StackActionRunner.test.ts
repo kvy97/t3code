@@ -8,6 +8,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   STACK_REBASE_ACTIVITY_KIND,
+  StackViewFailedError,
   ThreadId,
   TurnId,
   type OrchestrationCommand,
@@ -335,6 +336,40 @@ describe("StackActionRunner.run", () => {
       ),
     ),
   );
+
+  // Both channels of "unknown" default to queued. Reporting a queued stack as
+  // merged hands the user a completion nothing corrects; reporting a landed
+  // stack as queued costs one re-check and the row fixes itself.
+  for (const [label, view] of [
+    [
+      "cannot read the chain back",
+      () => Effect.succeed({ _tag: "unavailable", reason: "gh-missing" } as const),
+    ],
+    [
+      "fails to read the chain back",
+      () =>
+        Effect.fail(new StackViewFailedError({ worktreePath, detail: "not modeled in this test" })),
+    ],
+  ] as const) {
+    it.effect(`reports a merge it ${label} as queued, not merged`, () =>
+      Effect.gen(function* () {
+        const runner = yield* StackActionRunner;
+        const result = yield* runner.run({
+          worktreePath,
+          action: "merge",
+          requestedByThreadId: null,
+        });
+
+        assert.deepStrictEqual(result, { action: "merge", mergeDisposition: "queued" });
+      }).pipe(
+        Effect.provide(
+          runnerLayer({
+            cli: { runAction: () => Effect.succeed({ _tag: "ok" } as const), view },
+          }),
+        ),
+      ),
+    );
+  }
 
   it.effect("reports a merge that actually landed as merged", () =>
     Effect.gen(function* () {

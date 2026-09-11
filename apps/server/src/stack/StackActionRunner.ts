@@ -123,23 +123,31 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  /** A base branch with a merge queue takes the stack into the queue; saying
-      "merged" there would be a lie the user reads as done. The merge already
-      happened by the time this runs, so a failed read cannot fail the action
-      — it resolves to "queued", the answer a user can act on safely: a stack
-      that actually landed reads as merged the moment the row refreshes. */
-  const isQueued = (worktreePath: string) =>
-    cli.view({ cwd: worktreePath }).pipe(
-      Effect.map((outcome) =>
-        outcome._tag === "view" ? outcome.raw.branches.some((branch) => branch.isQueued) : false,
+  /**
+   * A base branch with a merge queue takes the stack into the queue; saying
+   * "merged" there would be a lie the user reads as done. The merge already
+   * happened by the time this runs, so neither an unreadable chain nor a
+   * failed read may fail the action — both resolve to "queued" instead.
+   * Unknown defaults to queued in BOTH channels on purpose: reporting a
+   * queued stack as merged hands the user a completion that nothing
+   * corrects, while a stack that really landed reads as merged the moment
+   * the row refreshes.
+   */
+  const isQueued = (worktreePath: string) => {
+    const unknown = (detail: string) =>
+      Effect.logWarning("could not tell a queued stack merge from a landed one", {
+        worktreePath,
+        detail,
+      }).pipe(Effect.as(true));
+    return cli.view({ cwd: worktreePath }).pipe(
+      Effect.flatMap((outcome) =>
+        outcome._tag === "view"
+          ? Effect.succeed(outcome.raw.branches.some((branch) => branch.isQueued))
+          : unknown(`gh stack view is unavailable: ${outcome.reason}`),
       ),
-      Effect.catch((error) =>
-        Effect.logWarning("could not tell a queued stack merge from a landed one", {
-          worktreePath,
-          detail: error.message,
-        }).pipe(Effect.as(true)),
-      ),
+      Effect.catch((error) => unknown(error.message)),
     );
+  };
 
   const appendActivity = (
     threadId: ThreadId,

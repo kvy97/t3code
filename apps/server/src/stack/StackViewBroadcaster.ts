@@ -148,10 +148,11 @@ export const make = Effect.gen(function* () {
 
   /**
    * Write the cache silently — used to populate a cold cache from a plain
-   * read. A read is not one of the four invalidation signals, so it must not
-   * echo back onto the PubSub (a `streamStack` subscriber that races its own
-   * cold-cache read against the subscription it just opened would otherwise
-   * see its own read as a phantom "change").
+   * read, for any reason the cache can be empty. A read is not one of the
+   * invalidation signals (see `streamStack` for what they are), so it must
+   * not echo back onto the PubSub: a `streamStack` subscriber that races its
+   * own cold-cache read against the subscription it just opened would
+   * otherwise see its own read as a phantom "change".
    */
   const writeCacheSilently = Effect.fn("StackViewBroadcaster.writeCacheSilently")(function* (
     worktreePath: string,
