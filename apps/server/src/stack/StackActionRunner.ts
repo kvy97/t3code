@@ -110,17 +110,35 @@ export const make = Effect.gen(function* () {
             latestTurnState: thread.latestTurn?.state ?? null,
           })),
       ),
-      Effect.orElseSucceed((): ReadonlyArray<WorktreeThreadFact> => []),
+      // A failed projection read must not become a silent green light: an
+      // empty list here makes findBusyWorktreeThread return null and lets the
+      // action run against a worktree that may have a live agent in it. Same
+      // shape as WorktreeTurnGuard's own read of this snapshot.
+      Effect.mapError(
+        (cause) =>
+          new StackViewFailedError({
+            worktreePath,
+            detail: `Could not read the worktree's threads: ${cause.message}`,
+          }),
+      ),
     );
 
   /** A base branch with a merge queue takes the stack into the queue; saying
-      "merged" there would be a lie the user reads as done. */
+      "merged" there would be a lie the user reads as done. The merge already
+      happened by the time this runs, so a failed read cannot fail the action
+      — it resolves to "queued", the answer a user can act on safely: a stack
+      that actually landed reads as merged the moment the row refreshes. */
   const isQueued = (worktreePath: string) =>
     cli.view({ cwd: worktreePath }).pipe(
       Effect.map((outcome) =>
         outcome._tag === "view" ? outcome.raw.branches.some((branch) => branch.isQueued) : false,
       ),
-      Effect.orElseSucceed(() => false),
+      Effect.catch((error) =>
+        Effect.logWarning("could not tell a queued stack merge from a landed one", {
+          worktreePath,
+          detail: error.message,
+        }).pipe(Effect.as(true)),
+      ),
     );
 
   const appendActivity = (
